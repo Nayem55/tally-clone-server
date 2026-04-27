@@ -71,6 +71,20 @@ function safeDate(value) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function voucherTotalAmount(voucher) {
+  const inventoryTotal = (voucher.inventoryLines || []).reduce(
+    (sum, line) => normalizeMoney(sum + (Number(line.amount) || 0)),
+    0,
+  );
+  if (inventoryTotal > 0) return inventoryTotal;
+
+  return (voucher.lines || []).reduce(
+    (sum, line) =>
+      Math.max(sum, Number(line.debit || 0), Number(line.credit || 0)),
+    0,
+  );
+}
+
 function escapeRegex(value = "") {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -406,17 +420,19 @@ async function ensureCompanyBaseCurrency(company) {
   });
 }
 
-async function buildStockSummary(companyId) {
+async function buildStockSummary(companyId, fromDate = null, toDate = null) {
   const [groups, items, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
     Vouchers.find({
       companyId,
+      ...(toDate ? { date: { $lte: toDate } } : {}),
       inventoryLines: { $exists: true, $ne: [] },
     }).toArray(),
   ]);
 
   const groupsById = new Map(groups.map((group) => [String(group._id), group]));
+  const openingMovementsByItem = new Map();
   const movementsByItem = new Map();
 
   vouchers.forEach((voucher) => {
@@ -424,6 +440,12 @@ async function buildStockSummary(companyId) {
     if (!Array.isArray(voucher.inventoryLines) || direction === 0) {
       return;
     }
+    const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+    const beforePeriod = fromDate && voucherDate ? voucherDate < fromDate : false;
+    const inPeriod =
+      !fromDate ||
+      ((voucherDate && voucherDate >= fromDate) &&
+        (!toDate || voucherDate <= toDate));
 
     voucher.inventoryLines.forEach((line) => {
       if (!line?.itemId) return;
@@ -434,35 +456,71 @@ async function buildStockSummary(companyId) {
         outwardQty: 0,
         outwardValue: 0,
       };
+      const openingCurrent = openingMovementsByItem.get(key) || {
+        inwardQty: 0,
+        inwardValue: 0,
+        outwardQty: 0,
+        outwardValue: 0,
+      };
 
       const qty = Number(line.qty) || 0;
       const amount =
         Number(line.amount) || normalizeMoney((Number(line.rate) || 0) * qty);
 
-      if (direction > 0) {
-        current.inwardQty += qty;
-        current.inwardValue += amount;
-      } else {
-        current.outwardQty += qty;
-        current.outwardValue += amount;
+      if (beforePeriod) {
+        if (direction > 0) {
+          openingCurrent.inwardQty += qty;
+          openingCurrent.inwardValue += amount;
+        } else {
+          openingCurrent.outwardQty += qty;
+          openingCurrent.outwardValue += amount;
+        }
+        openingMovementsByItem.set(key, openingCurrent);
       }
 
-      movementsByItem.set(key, current);
+      if (inPeriod) {
+        if (direction > 0) {
+          current.inwardQty += qty;
+          current.inwardValue += amount;
+        } else {
+          current.outwardQty += qty;
+          current.outwardValue += amount;
+        }
+        movementsByItem.set(key, current);
+      }
     });
   });
 
   const rows = items
     .map((item) => {
+      const openingMovement = openingMovementsByItem.get(String(item._id)) || {
+        inwardQty: 0,
+        inwardValue: 0,
+        outwardQty: 0,
+        outwardValue: 0,
+      };
       const movement = movementsByItem.get(String(item._id)) || {
         inwardQty: 0,
         inwardValue: 0,
         outwardQty: 0,
         outwardValue: 0,
       };
-      const openingQty = Number(item.openingQty) || 0;
-      const openingRate = Number(item.openingRate) || 0;
-      const openingValue =
-        Number(item.openingValue) || normalizeMoney(openingQty * openingRate);
+      const baseOpeningQty = Number(item.openingQty) || 0;
+      const baseOpeningRate = Number(item.openingRate) || 0;
+      const baseOpeningValue =
+        Number(item.openingValue) || normalizeMoney(baseOpeningQty * baseOpeningRate);
+      const openingQty = normalizeMoney(
+        baseOpeningQty + openingMovement.inwardQty - openingMovement.outwardQty,
+      );
+      const openingValue = normalizeMoney(
+        baseOpeningValue +
+          openingMovement.inwardValue -
+          openingMovement.outwardValue,
+      );
+      const openingRate =
+        openingQty !== 0
+          ? normalizeMoney(openingValue / openingQty)
+          : normalizeMoney(baseOpeningRate);
       const closingQty = normalizeMoney(
         openingQty + movement.inwardQty - movement.outwardQty,
       );
@@ -1178,6 +1236,42 @@ app.get("/companies/:companyId/ledgers", async (req, res) => {
     { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
   ]).toArray();
   res.json(ledgers);
+});
+
+app.get("/companies/:companyId/ledgers/with-balances", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const toDate = safeDate(req.query.to);
+    const [vouchers, ledgers] = await Promise.all([
+      Vouchers.find(
+        toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+      ).toArray(),
+      Ledgers.aggregate([
+        { $match: { companyId } },
+        {
+          $lookup: {
+            from: "groups",
+            localField: "groupId",
+            foreignField: "_id",
+            as: "group",
+          },
+        },
+        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+      ]).toArray(),
+    ]);
+
+    const balances = summarizeLedgerBalances(ledgers, vouchers, null, toDate);
+    const rows = balances.map((ledger) => ({
+      ...ledger,
+      currentBalance: normalizeMoney(ledger.closing || 0),
+      currentBalanceSide: ledger.closing >= 0 ? "DR" : "CR",
+      currentBalanceAbs: normalizeMoney(Math.abs(ledger.closing || 0)),
+    }));
+    res.json(rows);
+  } catch (err) {
+    console.error("Error loading ledger balances:", err);
+    res.status(500).json({ message: "Error loading ledger balances" });
+  }
 });
 
 app.get("/companies/:companyId/ledgers/defaults", async (req, res) => {
@@ -2608,7 +2702,7 @@ app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
     const fromDate = safeDate(req.query.from);
     const toDate = safeDate(req.query.to);
 
-    const [groups, vouchers, ledgers] = await Promise.all([
+    const [groups, vouchers, ledgers, stockSummary] = await Promise.all([
       Groups.find({ companyId }).toArray(),
       Vouchers.find({ companyId }).toArray(),
       Ledgers.aggregate([
@@ -2623,6 +2717,7 @@ app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
         },
         { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
       ]).toArray(),
+      buildStockSummary(companyId, fromDate, toDate),
     ]);
 
     const balances = summarizeLedgerBalances(
@@ -2651,38 +2746,119 @@ app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
         affectsGrossProfit: Boolean(group?.affectsGrossProfit),
       };
 
-      if (group?.nature === "INCOME" && row.amount > 0) incomes.push(row);
-      if (group?.nature === "EXPENSE" && row.amount > 0) expenses.push(row);
+      if (
+        group?.nature === "INCOME" &&
+        !row.affectsGrossProfit &&
+        row.amount > 0
+      ) {
+        incomes.push(row);
+      }
+      if (
+        group?.nature === "EXPENSE" &&
+        !row.affectsGrossProfit &&
+        row.amount > 0
+      ) {
+        expenses.push(row);
+      }
     });
 
-    const grossIncome = incomes
-      .filter((row) => row.affectsGrossProfit)
-      .reduce((sum, row) => normalizeMoney(sum + row.amount), 0);
-    const grossExpense = expenses
-      .filter((row) => row.affectsGrossProfit)
-      .reduce((sum, row) => normalizeMoney(sum + row.amount), 0);
-    const netIncome = incomes
-      .filter((row) => !row.affectsGrossProfit)
-      .reduce((sum, row) => normalizeMoney(sum + row.amount), 0);
-    const netExpense = expenses
-      .filter((row) => !row.affectsGrossProfit)
-      .reduce((sum, row) => normalizeMoney(sum + row.amount), 0);
+    const periodVouchers = vouchers.filter((voucher) => {
+      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+      return (
+        (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
+        (!toDate || (voucherDate && voucherDate <= toDate))
+      );
+    });
 
-    const grossProfit = normalizeMoney(grossIncome - grossExpense);
-    const netProfit = normalizeMoney(grossProfit + netIncome - netExpense);
+    const voucherTotals = {
+      sales: 0,
+      salesReturns: 0,
+      purchases: 0,
+      purchaseReturns: 0,
+    };
+
+    periodVouchers.forEach((voucher) => {
+      const name = nameKey(voucher.voucherName || "");
+      const amount = voucherTotalAmount(voucher);
+      if (name === "sales") {
+        voucherTotals.sales = normalizeMoney(voucherTotals.sales + amount);
+      } else if (name === "credit note") {
+        voucherTotals.salesReturns = normalizeMoney(
+          voucherTotals.salesReturns + amount,
+        );
+      } else if (name === "purchase") {
+        voucherTotals.purchases = normalizeMoney(
+          voucherTotals.purchases + amount,
+        );
+      } else if (name === "debit note") {
+        voucherTotals.purchaseReturns = normalizeMoney(
+          voucherTotals.purchaseReturns + amount,
+        );
+      }
+    });
+
+    const openingStock = normalizeMoney(
+      (stockSummary.rows || []).reduce(
+        (sum, row) => sum + Number(row.openingValue || 0),
+        0,
+      ),
+    );
+    const closingStock = normalizeMoney(
+      (stockSummary.rows || []).reduce(
+        (sum, row) => sum + Number(row.closingValue || 0),
+        0,
+      ),
+    );
+    const netSales = normalizeMoney(
+      voucherTotals.sales - voucherTotals.salesReturns,
+    );
+    const netPurchases = normalizeMoney(
+      voucherTotals.purchases - voucherTotals.purchaseReturns,
+    );
+    const costOfGoodsSold = normalizeMoney(
+      openingStock + netPurchases - closingStock,
+    );
+    const grossProfit = normalizeMoney(netSales - costOfGoodsSold);
+    const indirectIncome = incomes.reduce(
+      (sum, row) => normalizeMoney(sum + row.amount),
+      0,
+    );
+    const indirectExpense = expenses.reduce(
+      (sum, row) => normalizeMoney(sum + row.amount),
+      0,
+    );
+    const netProfit = normalizeMoney(
+      grossProfit + indirectIncome - indirectExpense,
+    );
+    const profitMargin = netSales
+      ? normalizeMoney((netProfit / netSales) * 100)
+      : 0;
 
     res.json({
       incomes: incomes.sort((a, b) => a.ledgerName.localeCompare(b.ledgerName)),
       expenses: expenses.sort((a, b) =>
         a.ledgerName.localeCompare(b.ledgerName),
       ),
-      totals: {
-        grossIncome,
-        grossExpense,
+      trading: {
+        sales: voucherTotals.sales,
+        salesReturns: voucherTotals.salesReturns,
+        netSales,
+        openingStock,
+        purchases: voucherTotals.purchases,
+        purchaseReturns: voucherTotals.purchaseReturns,
+        netPurchases,
+        closingStock,
+        costOfGoodsSold,
         grossProfit,
-        netIncome,
-        netExpense,
+      },
+      totals: {
+        grossIncome: netSales,
+        grossExpense: costOfGoodsSold,
+        grossProfit,
+        netIncome: indirectIncome,
+        netExpense: indirectExpense,
         netProfit,
+        profitMargin,
       },
     });
   } catch (err) {
