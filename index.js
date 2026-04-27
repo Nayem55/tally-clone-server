@@ -19,7 +19,17 @@ const PORT = Number(process.env.PORT) || 15001;
 app.use(express.json());
 
 let db;
-let Companies, Groups, Ledgers, VoucherTypes, Vouchers, Items, pricelevels;
+let Companies,
+  Groups,
+  Ledgers,
+  VoucherTypes,
+  Vouchers,
+  Items,
+  pricelevels,
+  Currencies,
+  StockCategories,
+  Units,
+  Godowns;
 
 const STOCK_VOUCHER_FLOW = {
   purchase: 1,
@@ -59,6 +69,24 @@ function safeDate(value) {
   if (!value) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function escapeRegex(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function resolveMasterName(collection, companyId, idOrName) {
+  if (!idOrName) return "";
+  const asText = normalizeName(idOrName);
+  if (!asText) return "";
+  if (ObjectId.isValid(asText)) {
+    const row = await collection.findOne({
+      _id: new ObjectId(asText),
+      companyId,
+    });
+    if (row?.name) return row.name;
+  }
+  return asText;
 }
 
 function summarizeLedgerBalances(ledgers, vouchers, fromDate, toDate) {
@@ -332,6 +360,52 @@ async function ensureCompanyCoreMasters(companyId) {
   }
 }
 
+async function ensureCompanyBaseCurrency(company) {
+  if (!company?._id) return;
+  const companyId = company._id;
+  const code = normalizeName(company.baseCurrencyCode || company.baseCurrencySymbol || "BDT");
+  const symbol = normalizeName(company.baseCurrencySymbol || code);
+  const name = normalizeName(company.formalName || "Base Currency");
+  const decimalPlaces = Number(company.decimalPlaces || 2);
+
+  const existing = await Currencies.findOne({
+    companyId,
+    code: { $regex: `^${escapeRegex(code)}$`, $options: "i" },
+  });
+
+  if (existing) {
+    await Currencies.updateOne(
+      { _id: existing._id, companyId },
+      {
+        $set: {
+          code,
+          symbol,
+          name,
+          decimalPlaces,
+          isBase: true,
+        },
+      },
+    );
+    await Currencies.updateMany(
+      { companyId, _id: { $ne: existing._id } },
+      { $set: { isBase: false } },
+    );
+    return;
+  }
+
+  await Currencies.updateMany({ companyId }, { $set: { isBase: false } });
+  await Currencies.insertOne({
+    companyId,
+    code,
+    symbol,
+    name,
+    decimalPlaces,
+    isBase: true,
+    isSystem: true,
+    createdAt: new Date(),
+  });
+}
+
 async function buildStockSummary(companyId) {
   const [groups, items, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
@@ -480,6 +554,10 @@ async function connectDb() {
   Vouchers = db.collection("vouchers");
   Items = db.collection("items");
   pricelevels = db.collection("pricelevels");
+  Currencies = db.collection("currencies");
+  StockCategories = db.collection("stockCategories");
+  Units = db.collection("units");
+  Godowns = db.collection("godowns");
   console.log("Connected to MongoDB");
 }
 
@@ -708,6 +786,27 @@ async function seedDefaultMasters(companyId) {
     createdAt: now,
     isSystem: true,
   });
+
+  const company = await Companies.findOne({ _id: companyId });
+  await ensureCompanyBaseCurrency(company);
+
+  await Units.insertOne({
+    companyId,
+    name: "Nos",
+    symbol: "Nos",
+    decimalPlaces: 2,
+    createdAt: now,
+    isSystem: true,
+  });
+
+  await Godowns.insertOne({
+    companyId,
+    name: "Main Location",
+    alias: "",
+    address: "",
+    createdAt: now,
+    isSystem: true,
+  });
 }
 
 // ---------- COMPANIES ----------
@@ -732,6 +831,7 @@ app.post("/companies", async (req, res) => {
       email,
       website,
       division,
+      baseCurrencyCode,
       baseCurrencySymbol,
       formalName,
       decimalPlaces,
@@ -775,6 +875,7 @@ app.post("/companies", async (req, res) => {
       email,
       website,
       division,
+      baseCurrencyCode: baseCurrencyCode || "BDT",
       baseCurrencySymbol: baseCurrencySymbol || "TK",
       formalName: formalName || "Bangladeshi Taka",
       decimalPlaces: Number(decimalPlaces || 2),
@@ -796,6 +897,7 @@ app.post("/companies", async (req, res) => {
     await ensureCompanyCoreMasters(companyId);
 
     const company = await Companies.findOne({ _id: companyId });
+    await ensureCompanyBaseCurrency(company);
 
     res.status(201).json({
       message: "Company created with default masters",
@@ -882,6 +984,7 @@ app.put("/companies/:companyId", async (req, res) => {
         email: req.body.email || "",
         website: req.body.website || "",
         division: req.body.division || "",
+        baseCurrencyCode: req.body.baseCurrencyCode || "BDT",
         baseCurrencySymbol: req.body.baseCurrencySymbol || "TK",
         formalName: req.body.formalName || "Bangladeshi Taka",
         decimalPlaces: Number(req.body.decimalPlaces || 2),
@@ -902,6 +1005,7 @@ app.put("/companies/:companyId", async (req, res) => {
 
     await Companies.updateOne({ _id: companyId }, update);
     const company = await Companies.findOne({ _id: companyId });
+    await ensureCompanyBaseCurrency(company);
     res.json(company);
   } catch (err) {
     console.error("Error updating company:", err);
@@ -1463,7 +1567,7 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
     const validLines = Array.isArray(lines)
       ? lines.filter((line) => line?.ledgerId)
       : [];
-    if (validLines.length < 2) {
+    if (voucherType.category !== "INVENTORY" && validLines.length < 2) {
       return res
         .status(400)
         .json({ message: "Voucher must have at least 2 accounting lines" });
@@ -1480,6 +1584,16 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
         amount: Number(i.amount) || Number(i.qty) * Number(i.rate),
         billedQty: Number(i.billedQty) || Number(i.qty),
         discount: Number(i.discount) || 0,
+        godownId:
+          i.godownId && ObjectId.isValid(i.godownId)
+            ? new ObjectId(i.godownId)
+            : null,
+        godownName: normalizeName(i.godownName),
+        toGodownId:
+          i.toGodownId && ObjectId.isValid(i.toGodownId)
+            ? new ObjectId(i.toGodownId)
+            : null,
+        toGodownName: normalizeName(i.toGodownName),
       }));
 
     let totalDr = 0;
@@ -1498,7 +1612,10 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       };
     });
 
-    if (totalDr.toFixed(2) !== totalCr.toFixed(2)) {
+    if (
+      voucherType.category !== "INVENTORY" &&
+      totalDr.toFixed(2) !== totalCr.toFixed(2)
+    ) {
       return res.status(400).json({
         message: "Total Debit and Credit must be equal",
       });
@@ -1511,7 +1628,7 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       number,
       date: new Date(date),
       narration: narration || "",
-      lines: normalizedLines,
+      lines: voucherType.category === "INVENTORY" ? [] : normalizedLines,
       inventoryLines: normalizedInventory,
       createdAt: new Date(),
     };
@@ -1540,8 +1657,15 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
     } = req.body;
 
     const update = { $set: {} };
+    let voucherType = null;
 
-    if (voucherTypeId) update.$set.voucherTypeId = new ObjectId(voucherTypeId);
+    if (voucherTypeId) {
+      update.$set.voucherTypeId = new ObjectId(voucherTypeId);
+      voucherType = await VoucherTypes.findOne({
+        _id: new ObjectId(voucherTypeId),
+        companyId,
+      });
+    }
     if (voucherName) update.$set.voucherName = normalizeName(voucherName);
     if (number !== undefined) update.$set.number = number;
     if (date) update.$set.date = new Date(date);
@@ -1562,12 +1686,16 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
           credit,
         };
       });
-      if (totalDr.toFixed(2) !== totalCr.toFixed(2)) {
+      if (
+        voucherType?.category !== "INVENTORY" &&
+        totalDr.toFixed(2) !== totalCr.toFixed(2)
+      ) {
         return res
           .status(400)
           .json({ message: "Total Debit and Credit must be equal" });
       }
-      update.$set.lines = normalizedLines;
+      update.$set.lines =
+        voucherType?.category === "INVENTORY" ? [] : normalizedLines;
     }
 
     if (Array.isArray(inventoryLines)) {
@@ -1585,6 +1713,16 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
             (Number(line.qty) || 0) * (Number(line.rate) || 0),
           billedQty: Number(line.billedQty) || Number(line.qty) || 0,
           discount: Number(line.discount) || 0,
+          godownId:
+            line.godownId && ObjectId.isValid(line.godownId)
+              ? new ObjectId(line.godownId)
+              : null,
+          godownName: normalizeName(line.godownName),
+          toGodownId:
+            line.toGodownId && ObjectId.isValid(line.toGodownId)
+              ? new ObjectId(line.toGodownId)
+              : null,
+          toGodownName: normalizeName(line.toGodownName),
         }));
     }
 
@@ -1830,6 +1968,38 @@ app.get("/companies/:companyId/items", async (req, res) => {
       },
     },
     { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "stockCategories",
+        localField: "stockCategoryId",
+        foreignField: "_id",
+        as: "stockCategoryMaster",
+      },
+    },
+    {
+      $unwind: {
+        path: "$stockCategoryMaster",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
+      $lookup: {
+        from: "units",
+        localField: "unitId",
+        foreignField: "_id",
+        as: "unitMaster",
+      },
+    },
+    { $unwind: { path: "$unitMaster", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "godowns",
+        localField: "godownId",
+        foreignField: "_id",
+        as: "godownMaster",
+      },
+    },
+    { $unwind: { path: "$godownMaster", preserveNullAndEmptyArrays: true } },
   ]).toArray();
 
   res.json(items);
@@ -1844,8 +2014,11 @@ app.post("/companies/:companyId/items", async (req, res) => {
       name,
       alias,
       groupId,
+      stockCategoryId,
       stockCategory,
+      unitId,
       unitOfMeasure,
+      godownId,
       description,
       notes,
       picture,
@@ -1886,13 +2059,37 @@ app.post("/companies/:companyId/items", async (req, res) => {
       return res.status(400).json({ message: "Item name already exists" });
     }
 
+    const resolvedStockCategory = await resolveMasterName(
+      StockCategories,
+      companyId,
+      stockCategoryId || stockCategory,
+    );
+    const resolvedUnit = await resolveMasterName(
+      Units,
+      companyId,
+      unitId || unitOfMeasure,
+    );
+    const resolvedGodown = await resolveMasterName(
+      Godowns,
+      companyId,
+      godownId,
+    );
+
     const doc = {
       companyId,
       name: normalizedName,
       alias: normalizeName(alias),
       groupId: new ObjectId(groupId),
-      stockCategory: normalizeName(stockCategory),
-      unitOfMeasure: normalizeName(unitOfMeasure),
+      stockCategoryId:
+        stockCategoryId && ObjectId.isValid(stockCategoryId)
+          ? new ObjectId(stockCategoryId)
+          : null,
+      stockCategory: normalizeName(resolvedStockCategory),
+      unitId: unitId && ObjectId.isValid(unitId) ? new ObjectId(unitId) : null,
+      unitOfMeasure: normalizeName(resolvedUnit),
+      godownId:
+        godownId && ObjectId.isValid(godownId) ? new ObjectId(godownId) : null,
+      godownName: normalizeName(resolvedGodown),
       description: normalizeName(description),
       notes: normalizeName(notes),
       picture: picture || "",
@@ -1923,8 +2120,11 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
       name,
       alias,
       groupId,
+      stockCategoryId,
       stockCategory,
+      unitId,
       unitOfMeasure,
+      godownId,
       description,
       notes,
       picture,
@@ -1964,6 +2164,22 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
         .json({ message: "Items must be created under a stock group" });
     }
 
+    const resolvedStockCategory = await resolveMasterName(
+      StockCategories,
+      companyId,
+      stockCategoryId || stockCategory,
+    );
+    const resolvedUnit = await resolveMasterName(
+      Units,
+      companyId,
+      unitId || unitOfMeasure,
+    );
+    const resolvedGodown = await resolveMasterName(
+      Godowns,
+      companyId,
+      godownId,
+    );
+
     const openingValue = Number(openingQty) * Number(openingRate);
 
     const update = {
@@ -1971,8 +2187,19 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
         name: normalizedName,
         alias: normalizeName(alias),
         groupId: new ObjectId(groupId),
-        stockCategory: normalizeName(stockCategory),
-        unitOfMeasure: normalizeName(unitOfMeasure),
+        stockCategoryId:
+          stockCategoryId && ObjectId.isValid(stockCategoryId)
+            ? new ObjectId(stockCategoryId)
+            : null,
+        stockCategory: normalizeName(resolvedStockCategory),
+        unitId:
+          unitId && ObjectId.isValid(unitId) ? new ObjectId(unitId) : null,
+        unitOfMeasure: normalizeName(resolvedUnit),
+        godownId:
+          godownId && ObjectId.isValid(godownId)
+            ? new ObjectId(godownId)
+            : null,
+        godownName: normalizeName(resolvedGodown),
         description: normalizeName(description),
         notes: normalizeName(notes),
         picture: picture || "",
@@ -2464,6 +2691,118 @@ app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
   }
 });
 
+app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await ensureCompanyCoreMasters(companyId);
+    const toDate = safeDate(req.query.to);
+
+    const [groups, vouchers, ledgers, stockSummary] = await Promise.all([
+      Groups.find({ companyId }).toArray(),
+      Vouchers.find(
+        toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+      ).toArray(),
+      Ledgers.aggregate([
+        { $match: { companyId } },
+        {
+          $lookup: {
+            from: "groups",
+            localField: "groupId",
+            foreignField: "_id",
+            as: "group",
+          },
+        },
+        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+      ]).toArray(),
+      buildStockSummary(companyId),
+    ]);
+
+    const balances = summarizeLedgerBalances(ledgers, vouchers, null, toDate);
+    const groupMap = new Map(groups.map((group) => [String(group._id), group]));
+
+    const assets = new Map();
+    const liabilities = new Map();
+
+    balances.forEach((ledger) => {
+      const group = groupMap.get(String(ledger.groupId)) || ledger.group;
+      if (!group) return;
+
+      if (group.nature === "ASSET") {
+        const key = group.name;
+        const current = assets.get(key) || {
+          groupName: key,
+          amount: 0,
+          ledgers: [],
+        };
+        current.amount = normalizeMoney(
+          current.amount + (ledger.closingDebit || 0),
+        );
+        current.ledgers.push({
+          ledgerId: ledger._id,
+          ledgerName: ledger.name,
+          amount: normalizeMoney(ledger.closingDebit || 0),
+        });
+        assets.set(key, current);
+      }
+
+      if (group.nature === "LIABILITY") {
+        const key = group.name;
+        const current = liabilities.get(key) || {
+          groupName: key,
+          amount: 0,
+          ledgers: [],
+        };
+        current.amount = normalizeMoney(
+          current.amount + (ledger.closingCredit || 0),
+        );
+        current.ledgers.push({
+          ledgerId: ledger._id,
+          ledgerName: ledger.name,
+          amount: normalizeMoney(ledger.closingCredit || 0),
+        });
+        liabilities.set(key, current);
+      }
+    });
+
+    if (stockSummary?.totals?.closingValue) {
+      const current = assets.get("Closing Stock") || {
+        groupName: "Closing Stock",
+        amount: 0,
+        ledgers: [],
+      };
+      current.amount = normalizeMoney(
+        current.amount + Number(stockSummary.totals.closingValue || 0),
+      );
+      assets.set("Closing Stock", current);
+    }
+
+    const assetRows = [...assets.values()].sort((a, b) =>
+      a.groupName.localeCompare(b.groupName),
+    );
+    const liabilityRows = [...liabilities.values()].sort((a, b) =>
+      a.groupName.localeCompare(b.groupName),
+    );
+
+    res.json({
+      assets: assetRows,
+      liabilities: liabilityRows,
+      totals: {
+        assets: assetRows.reduce(
+          (sum, row) => normalizeMoney(sum + Number(row.amount || 0)),
+          0,
+        ),
+        liabilities: liabilityRows.reduce(
+          (sum, row) => normalizeMoney(sum + Number(row.amount || 0)),
+          0,
+        ),
+      },
+    });
+  } catch (err) {
+    console.error("Error building balance sheet:", err);
+    res.status(500).json({ message: "Error building balance sheet" });
+  }
+});
+
 app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
@@ -2583,6 +2922,159 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
   } catch (err) {
     console.error("Error loading dashboard report:", err);
     res.status(500).json({ message: "Error loading dashboard report" });
+  }
+});
+
+app.get("/companies/:companyId/reports/outstanding", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const type = String(req.query.type || "receivable").toLowerCase();
+    const toDate = safeDate(req.query.to);
+
+    const [vouchers, ledgers] = await Promise.all([
+      Vouchers.find(
+        toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+      ).toArray(),
+      Ledgers.aggregate([
+        { $match: { companyId } },
+        {
+          $lookup: {
+            from: "groups",
+            localField: "groupId",
+            foreignField: "_id",
+            as: "group",
+          },
+        },
+        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+      ]).toArray(),
+    ]);
+
+    const balances = summarizeLedgerBalances(ledgers, vouchers, null, toDate);
+    const targetGroupName =
+      type === "payable" ? "sundry creditors" : "sundry debtors";
+
+    const rows = balances
+      .filter((row) => nameKey(row.group?.name || "") === targetGroupName)
+      .map((row) => ({
+        ledgerId: row._id,
+        ledgerName: row.name,
+        amount:
+          type === "payable"
+            ? normalizeMoney(row.closingCredit || 0)
+            : normalizeMoney(row.closingDebit || 0),
+      }))
+      .filter((row) => row.amount > 0)
+      .sort((a, b) => b.amount - a.amount);
+
+    res.json({
+      type,
+      rows,
+      total: rows.reduce((sum, row) => normalizeMoney(sum + row.amount), 0),
+      asOn: toDate || new Date(),
+    });
+  } catch (err) {
+    console.error("Error loading outstanding report:", err);
+    res.status(500).json({ message: "Error loading outstanding report" });
+  }
+});
+
+app.get("/companies/:companyId/reports/cash-flow", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const fromDate = safeDate(req.query.from);
+    const toDate = safeDate(req.query.to);
+
+    const [vouchers, ledgers] = await Promise.all([
+      Vouchers.find({ companyId }).toArray(),
+      Ledgers.aggregate([
+        { $match: { companyId } },
+        {
+          $lookup: {
+            from: "groups",
+            localField: "groupId",
+            foreignField: "_id",
+            as: "group",
+          },
+        },
+        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+      ]).toArray(),
+    ]);
+
+    const cashBankLedgers = ledgers.filter((row) =>
+      ["cash-in-hand", "bank accounts"].includes(
+        nameKey(row.group?.name || ""),
+      ),
+    );
+    const cashBankIds = new Set(cashBankLedgers.map((row) => String(row._id)));
+    const balances = summarizeLedgerBalances(
+      ledgers,
+      vouchers,
+      fromDate,
+      toDate,
+    );
+    const cashBalances = balances.filter((row) =>
+      cashBankIds.has(String(row._id)),
+    );
+
+    let inflow = 0;
+    let outflow = 0;
+    const monthlyMap = new Map();
+
+    vouchers.forEach((voucher) => {
+      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+      const inPeriod =
+        (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
+        (!toDate || (voucherDate && voucherDate <= toDate));
+      if (!inPeriod) return;
+
+      let monthKey = "Unknown";
+      if (voucherDate) {
+        monthKey = dayjs(voucherDate).format("MMM YYYY");
+      }
+      const month = monthlyMap.get(monthKey) || { inflow: 0, outflow: 0 };
+
+      (voucher.lines || []).forEach((line) => {
+        if (!cashBankIds.has(String(line.ledgerId))) return;
+        const debit = Number(line.debit || 0);
+        const credit = Number(line.credit || 0);
+        inflow = normalizeMoney(inflow + debit);
+        outflow = normalizeMoney(outflow + credit);
+        month.inflow = normalizeMoney(month.inflow + debit);
+        month.outflow = normalizeMoney(month.outflow + credit);
+      });
+
+      monthlyMap.set(monthKey, month);
+    });
+
+    res.json({
+      openingBalance: cashBalances.reduce(
+        (sum, row) => normalizeMoney(sum + Number(row.opening || 0)),
+        0,
+      ),
+      inflow,
+      outflow,
+      netFlow: normalizeMoney(inflow - outflow),
+      closingBalance: cashBalances.reduce(
+        (sum, row) => normalizeMoney(sum + Number(row.closing || 0)),
+        0,
+      ),
+      monthly: [...monthlyMap.entries()].map(([label, value]) => ({
+        label,
+        inflow: value.inflow,
+        outflow: value.outflow,
+        net: normalizeMoney(value.inflow - value.outflow),
+      })),
+      ledgerBalances: cashBalances
+        .map((row) => ({
+          ledgerId: row._id,
+          ledgerName: row.name,
+          closing: normalizeMoney(row.closing || 0),
+        }))
+        .sort((a, b) => a.ledgerName.localeCompare(b.ledgerName)),
+    });
+  } catch (err) {
+    console.error("Error loading cash flow:", err);
+    res.status(500).json({ message: "Error loading cash flow" });
   }
 });
 
@@ -2735,6 +3227,356 @@ app.delete("/companies/:companyId/price-levels/:id", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Error deleting price level" });
+  }
+});
+
+async function listNamedMasters(collection, companyId, extraSort = {}) {
+  return collection
+    .find({ companyId })
+    .sort({ name: 1, ...extraSort })
+    .toArray();
+}
+
+async function createNamedMaster(collection, companyId, payload, options = {}) {
+  const name = normalizeName(payload.name);
+  if (!name) throw new Error("Name is required");
+
+  const duplicate = await collection.findOne({
+    companyId,
+    name: { $regex: `^${escapeRegex(name)}$`, $options: "i" },
+  });
+  if (duplicate)
+    throw new Error(options.duplicateMessage || "Name already exists");
+
+  const doc = {
+    companyId,
+    name,
+    createdAt: new Date(),
+    ...(options.mapPayload ? options.mapPayload(payload, companyId) : {}),
+  };
+
+  const result = await collection.insertOne(doc);
+  return { _id: result.insertedId, ...doc };
+}
+
+async function updateNamedMaster(
+  collection,
+  companyId,
+  id,
+  payload,
+  options = {},
+) {
+  const rowId = new ObjectId(id);
+  const existing = await collection.findOne({ _id: rowId, companyId });
+  if (!existing) throw new Error("Record not found");
+  if (existing.isSystem) throw new Error("System master cannot be altered");
+
+  const name = normalizeName(payload.name);
+  if (!name) throw new Error("Name is required");
+
+  const duplicate = await collection.findOne({
+    _id: { $ne: rowId },
+    companyId,
+    name: { $regex: `^${escapeRegex(name)}$`, $options: "i" },
+  });
+  if (duplicate)
+    throw new Error(options.duplicateMessage || "Name already exists");
+
+  await collection.updateOne(
+    { _id: rowId, companyId },
+    {
+      $set: {
+        name,
+        ...(options.mapPayload ? options.mapPayload(payload, companyId) : {}),
+      },
+    },
+  );
+}
+
+async function deleteNamedMaster(collection, companyId, id, usageCheck) {
+  const row = await collection.findOne({ _id: new ObjectId(id), companyId });
+  if (!row) throw new Error("Record not found");
+  if (row.isSystem) throw new Error("System master cannot be deleted");
+  if (usageCheck) await usageCheck(row);
+  await collection.deleteOne({ _id: row._id, companyId });
+}
+
+app.get("/companies/:companyId/units", async (req, res) => {
+  const companyId = new ObjectId(req.params.companyId);
+  res.json(await listNamedMasters(Units, companyId, { createdAt: 1 }));
+});
+
+app.post("/companies/:companyId/units", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const row = await createNamedMaster(Units, companyId, req.body, {
+      duplicateMessage: "Unit already exists",
+      mapPayload: (payload) => ({
+        symbol: normalizeName(payload.symbol),
+        decimalPlaces: Number(payload.decimalPlaces || 2),
+      }),
+    });
+    res.status(201).json(row);
+  } catch (err) {
+    res.status(400).json({ message: err.message || "Unable to create unit" });
+  }
+});
+
+app.put("/companies/:companyId/units/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await updateNamedMaster(Units, companyId, req.params.id, req.body, {
+      duplicateMessage: "Unit already exists",
+      mapPayload: (payload) => ({
+        symbol: normalizeName(payload.symbol),
+        decimalPlaces: Number(payload.decimalPlaces || 2),
+      }),
+    });
+    res.json(
+      await Units.findOne({ _id: new ObjectId(req.params.id), companyId }),
+    );
+  } catch (err) {
+    res.status(400).json({ message: err.message || "Unable to update unit" });
+  }
+});
+
+app.delete("/companies/:companyId/units/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await deleteNamedMaster(Units, companyId, req.params.id, async (row) => {
+      const used = await Items.countDocuments({
+        companyId,
+        $or: [{ unitId: row._id }, { unitOfMeasure: row.name }],
+      });
+      if (used > 0) throw new Error("Unit is used in stock items");
+    });
+    res.json({ message: "Unit deleted" });
+  } catch (err) {
+    res.status(400).json({ message: err.message || "Unable to delete unit" });
+  }
+});
+
+app.get("/companies/:companyId/godowns", async (req, res) => {
+  const companyId = new ObjectId(req.params.companyId);
+  res.json(await listNamedMasters(Godowns, companyId, { createdAt: 1 }));
+});
+
+app.post("/companies/:companyId/godowns", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const row = await createNamedMaster(Godowns, companyId, req.body, {
+      duplicateMessage: "Godown already exists",
+      mapPayload: (payload) => ({
+        alias: normalizeName(payload.alias),
+        address: normalizeName(payload.address),
+      }),
+    });
+    res.status(201).json(row);
+  } catch (err) {
+    res.status(400).json({ message: err.message || "Unable to create godown" });
+  }
+});
+
+app.put("/companies/:companyId/godowns/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await updateNamedMaster(Godowns, companyId, req.params.id, req.body, {
+      duplicateMessage: "Godown already exists",
+      mapPayload: (payload) => ({
+        alias: normalizeName(payload.alias),
+        address: normalizeName(payload.address),
+      }),
+    });
+    res.json(
+      await Godowns.findOne({ _id: new ObjectId(req.params.id), companyId }),
+    );
+  } catch (err) {
+    res.status(400).json({ message: err.message || "Unable to update godown" });
+  }
+});
+
+app.delete("/companies/:companyId/godowns/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await deleteNamedMaster(Godowns, companyId, req.params.id);
+    res.json({ message: "Godown deleted" });
+  } catch (err) {
+    res.status(400).json({ message: err.message || "Unable to delete godown" });
+  }
+});
+
+app.get("/companies/:companyId/stock-categories", async (req, res) => {
+  const companyId = new ObjectId(req.params.companyId);
+  const rows = await StockCategories.aggregate([
+    { $match: { companyId } },
+    {
+      $lookup: {
+        from: "stockCategories",
+        localField: "parentId",
+        foreignField: "_id",
+        as: "parent",
+      },
+    },
+    { $unwind: { path: "$parent", preserveNullAndEmptyArrays: true } },
+    { $sort: { name: 1 } },
+  ]).toArray();
+  res.json(rows);
+});
+
+app.post("/companies/:companyId/stock-categories", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const row = await createNamedMaster(StockCategories, companyId, req.body, {
+      duplicateMessage: "Stock category already exists",
+      mapPayload: (payload) => ({
+        parentId: payload.parentId ? new ObjectId(payload.parentId) : null,
+      }),
+    });
+    res.status(201).json(row);
+  } catch (err) {
+    res
+      .status(400)
+      .json({ message: err.message || "Unable to create stock category" });
+  }
+});
+
+app.put("/companies/:companyId/stock-categories/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await updateNamedMaster(
+      StockCategories,
+      companyId,
+      req.params.id,
+      req.body,
+      {
+        duplicateMessage: "Stock category already exists",
+        mapPayload: (payload) => ({
+          parentId: payload.parentId ? new ObjectId(payload.parentId) : null,
+        }),
+      },
+    );
+    res.json(
+      await StockCategories.findOne({
+        _id: new ObjectId(req.params.id),
+        companyId,
+      }),
+    );
+  } catch (err) {
+    res
+      .status(400)
+      .json({ message: err.message || "Unable to update stock category" });
+  }
+});
+
+app.delete("/companies/:companyId/stock-categories/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await deleteNamedMaster(
+      StockCategories,
+      companyId,
+      req.params.id,
+      async (row) => {
+        const childCount = await StockCategories.countDocuments({
+          companyId,
+          parentId: row._id,
+        });
+        if (childCount > 0)
+          throw new Error("Stock category has child categories");
+        const used = await Items.countDocuments({
+          companyId,
+          $or: [{ stockCategoryId: row._id }, { stockCategory: row.name }],
+        });
+        if (used > 0) throw new Error("Stock category is used in stock items");
+      },
+    );
+    res.json({ message: "Stock category deleted" });
+  } catch (err) {
+    res
+      .status(400)
+      .json({ message: err.message || "Unable to delete stock category" });
+  }
+});
+
+app.get("/companies/:companyId/currencies", async (req, res) => {
+  const companyId = new ObjectId(req.params.companyId);
+  const company = await Companies.findOne({ _id: companyId });
+  await ensureCompanyBaseCurrency(company);
+  const rows = await Currencies.find({ companyId }).sort({ isBase: -1, code: 1 }).toArray();
+  res.json(rows);
+});
+
+app.post("/companies/:companyId/currencies", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const code = normalizeName(req.body.code);
+    const symbol = normalizeName(req.body.symbol);
+    const name = normalizeName(req.body.name);
+    const decimalPlaces = Number(req.body.decimalPlaces || 2);
+    if (!code || !name) {
+      return res.status(400).json({ message: "Currency code and name are required" });
+    }
+
+    const duplicate = await Currencies.findOne({
+      companyId,
+      code: { $regex: `^${escapeRegex(code)}$`, $options: "i" },
+    });
+    if (duplicate) {
+      return res.status(400).json({ message: "Currency already exists" });
+    }
+
+    const doc = {
+      companyId,
+      code,
+      symbol: symbol || code,
+      name,
+      decimalPlaces,
+      isBase: false,
+      createdAt: new Date(),
+    };
+    const result = await Currencies.insertOne(doc);
+    res.status(201).json({ _id: result.insertedId, ...doc });
+  } catch (err) {
+    res.status(500).json({ message: "Unable to create currency" });
+  }
+});
+
+app.put("/companies/:companyId/currencies/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const id = new ObjectId(req.params.id);
+    const existing = await Currencies.findOne({ _id: id, companyId });
+    if (!existing) return res.status(404).json({ message: "Currency not found" });
+    if (existing.isSystem) {
+      return res.status(400).json({ message: "Base currency cannot be altered here" });
+    }
+
+    const code = normalizeName(req.body.code);
+    const symbol = normalizeName(req.body.symbol);
+    const name = normalizeName(req.body.name);
+    const decimalPlaces = Number(req.body.decimalPlaces || 2);
+    await Currencies.updateOne(
+      { _id: id, companyId },
+      { $set: { code, symbol: symbol || code, name, decimalPlaces } },
+    );
+    res.json(await Currencies.findOne({ _id: id, companyId }));
+  } catch (err) {
+    res.status(500).json({ message: "Unable to update currency" });
+  }
+});
+
+app.delete("/companies/:companyId/currencies/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const id = new ObjectId(req.params.id);
+    const existing = await Currencies.findOne({ _id: id, companyId });
+    if (!existing) return res.status(404).json({ message: "Currency not found" });
+    if (existing.isBase || existing.isSystem) {
+      return res.status(400).json({ message: "Base currency cannot be deleted" });
+    }
+    await Currencies.deleteOne({ _id: id, companyId });
+    res.json({ message: "Currency deleted" });
+  } catch (err) {
+    res.status(500).json({ message: "Unable to delete currency" });
   }
 });
 
