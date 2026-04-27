@@ -55,13 +55,207 @@ function inferStockDirection(voucherName = "") {
   return STOCK_VOUCHER_FLOW[key] || 0;
 }
 
+function safeDate(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function summarizeLedgerBalances(ledgers, vouchers, fromDate, toDate) {
+  const openingMap = new Map();
+  const periodMap = new Map();
+
+  vouchers.forEach((voucher) => {
+    const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+    const beforePeriod =
+      fromDate && voucherDate ? voucherDate < fromDate : !fromDate;
+    const inPeriod =
+      (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
+      (!toDate || (voucherDate && voucherDate <= toDate));
+
+    (voucher.lines || []).forEach((line) => {
+      const ledgerKey = String(line.ledgerId);
+      if (beforePeriod) {
+        const current = openingMap.get(ledgerKey) || 0;
+        openingMap.set(
+          ledgerKey,
+          normalizeMoney(
+            current + (Number(line.debit) || 0) - (Number(line.credit) || 0),
+          ),
+        );
+      }
+
+      if (inPeriod) {
+        const current = periodMap.get(ledgerKey) || { debit: 0, credit: 0 };
+        current.debit = normalizeMoney(
+          current.debit + (Number(line.debit) || 0),
+        );
+        current.credit = normalizeMoney(
+          current.credit + (Number(line.credit) || 0),
+        );
+        periodMap.set(ledgerKey, current);
+      }
+    });
+  });
+
+  return ledgers.map((ledger) => {
+    const openingMovement = openingMap.get(String(ledger._id)) || 0;
+    const fixedOpening =
+      (ledger.openingDrCr === "DR" ? 1 : -1) *
+      (Number(ledger.openingBalance) || 0);
+    const opening = normalizeMoney(fixedOpening + openingMovement);
+    const periodMovement = periodMap.get(String(ledger._id)) || {
+      debit: 0,
+      credit: 0,
+    };
+    const debit = normalizeMoney(periodMovement.debit || 0);
+    const credit = normalizeMoney(periodMovement.credit || 0);
+    const closing = normalizeMoney(opening + debit - credit);
+
+    return {
+      ...ledger,
+      opening,
+      openingDebit: splitBalance(opening).debit,
+      openingCredit: splitBalance(opening).credit,
+      debit,
+      credit,
+      closing,
+      closingDebit: splitBalance(closing).debit,
+      closingCredit: splitBalance(closing).credit,
+    };
+  });
+}
+
+function buildGroupedBalanceTree(groups, ledgerBalances) {
+  const groupsById = new Map(groups.map((group) => [String(group._id), group]));
+  const childrenMap = new Map();
+  groups.forEach((group) => {
+    const key = group.parentId ? String(group.parentId) : "ROOT";
+    if (!childrenMap.has(key)) childrenMap.set(key, []);
+    childrenMap.get(key).push(group);
+  });
+
+  const ledgersByGroup = new Map();
+  ledgerBalances.forEach((ledger) => {
+    const key = String(ledger.groupId);
+    if (!ledgersByGroup.has(key)) ledgersByGroup.set(key, []);
+    ledgersByGroup.get(key).push(ledger);
+  });
+
+  for (const children of childrenMap.values()) {
+    children.sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  function aggregateGroup(group) {
+    const directLedgers = ledgersByGroup.get(String(group._id)) || [];
+    const childGroups = (childrenMap.get(String(group._id)) || []).map(
+      aggregateGroup,
+    );
+
+    const totals = {
+      openingDebit: 0,
+      openingCredit: 0,
+      debit: 0,
+      credit: 0,
+      closingDebit: 0,
+      closingCredit: 0,
+    };
+
+    directLedgers.forEach((ledger) => {
+      totals.openingDebit = normalizeMoney(
+        totals.openingDebit + ledger.openingDebit,
+      );
+      totals.openingCredit = normalizeMoney(
+        totals.openingCredit + ledger.openingCredit,
+      );
+      totals.debit = normalizeMoney(totals.debit + ledger.debit);
+      totals.credit = normalizeMoney(totals.credit + ledger.credit);
+      totals.closingDebit = normalizeMoney(
+        totals.closingDebit + ledger.closingDebit,
+      );
+      totals.closingCredit = normalizeMoney(
+        totals.closingCredit + ledger.closingCredit,
+      );
+    });
+
+    childGroups.forEach((child) => {
+      totals.openingDebit = normalizeMoney(
+        totals.openingDebit + child.totals.openingDebit,
+      );
+      totals.openingCredit = normalizeMoney(
+        totals.openingCredit + child.totals.openingCredit,
+      );
+      totals.debit = normalizeMoney(totals.debit + child.totals.debit);
+      totals.credit = normalizeMoney(totals.credit + child.totals.credit);
+      totals.closingDebit = normalizeMoney(
+        totals.closingDebit + child.totals.closingDebit,
+      );
+      totals.closingCredit = normalizeMoney(
+        totals.closingCredit + child.totals.closingCredit,
+      );
+    });
+
+    return {
+      id: group._id,
+      name: group.name,
+      parentId: group.parentId || null,
+      nature: group.nature,
+      level: 0,
+      totals,
+      ledgers: directLedgers
+        .slice()
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map((ledger) => ({
+          id: ledger._id,
+          name: ledger.name,
+          groupId: ledger.groupId,
+          groupName: groupsById.get(String(ledger.groupId))?.name || "",
+          type: "ledger",
+          totals: {
+            openingDebit: ledger.openingDebit,
+            openingCredit: ledger.openingCredit,
+            debit: ledger.debit,
+            credit: ledger.credit,
+            closingDebit: ledger.closingDebit,
+            closingCredit: ledger.closingCredit,
+          },
+        })),
+      children: childGroups,
+      type: "group",
+    };
+  }
+
+  return (childrenMap.get("ROOT") || []).map(aggregateGroup);
+}
+
+function flattenGroupTree(tree, level = 0) {
+  const rows = [];
+  tree.forEach((node) => {
+    rows.push({ ...node, level });
+    node.ledgers.forEach((ledger) =>
+      rows.push({
+        ...ledger,
+        level: level + 1,
+        parentGroupId: node.id,
+      }),
+    );
+    rows.push(...flattenGroupTree(node.children, level + 1));
+  });
+  return rows;
+}
+
 async function ensureCompanyCoreMasters(companyId) {
   const now = new Date();
   const groups = await Groups.find({ companyId }).toArray();
-  const groupByName = new Map(groups.map((group) => [nameKey(group.name), group]));
+  const groupByName = new Map(
+    groups.map((group) => [nameKey(group.name), group]),
+  );
   const missingGroups = [];
 
-  if (!groupByName.has("stock-in-trade") && !groupByName.has("stock in trade")) {
+  if (
+    !groupByName.has("stock-in-trade") &&
+    !groupByName.has("stock in trade")
+  ) {
     missingGroups.push({
       companyId,
       name: "Stock-in-Trade",
@@ -80,17 +274,20 @@ async function ensureCompanyCoreMasters(companyId) {
 
   const refreshedGroups = await Groups.find({ companyId }).toArray();
   const refreshedGroupByName = new Map(
-    refreshedGroups.map((group) => [nameKey(group.name), group])
+    refreshedGroups.map((group) => [nameKey(group.name), group]),
   );
 
   const salesAccountsGroup =
-    refreshedGroupByName.get("sales accounts") || refreshedGroupByName.get("sales account");
+    refreshedGroupByName.get("sales accounts") ||
+    refreshedGroupByName.get("sales account");
   const purchaseAccountsGroup =
     refreshedGroupByName.get("purchase accounts") ||
     refreshedGroupByName.get("purchase account");
 
   const ledgers = await Ledgers.find({ companyId }).toArray();
-  const ledgerByName = new Map(ledgers.map((ledger) => [nameKey(ledger.name), ledger]));
+  const ledgerByName = new Map(
+    ledgers.map((ledger) => [nameKey(ledger.name), ledger]),
+  );
   const missingLedgers = [];
 
   if (salesAccountsGroup && !ledgerByName.has("sales")) {
@@ -139,7 +336,10 @@ async function buildStockSummary(companyId) {
   const [groups, items, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
-    Vouchers.find({ companyId, inventoryLines: { $exists: true, $ne: [] } }).toArray(),
+    Vouchers.find({
+      companyId,
+      inventoryLines: { $exists: true, $ne: [] },
+    }).toArray(),
   ]);
 
   const groupsById = new Map(groups.map((group) => [String(group._id), group]));
@@ -190,13 +390,15 @@ async function buildStockSummary(companyId) {
       const openingValue =
         Number(item.openingValue) || normalizeMoney(openingQty * openingRate);
       const closingQty = normalizeMoney(
-        openingQty + movement.inwardQty - movement.outwardQty
+        openingQty + movement.inwardQty - movement.outwardQty,
       );
       const closingValue = normalizeMoney(
-        openingValue + movement.inwardValue - movement.outwardValue
+        openingValue + movement.inwardValue - movement.outwardValue,
       );
       const closingRate =
-        closingQty !== 0 ? normalizeMoney(closingValue / closingQty) : openingRate;
+        closingQty !== 0
+          ? normalizeMoney(closingValue / closingQty)
+          : openingRate;
 
       return {
         itemId: item._id,
@@ -238,7 +440,7 @@ async function buildStockSummary(companyId) {
       outwardValue: 0,
       closingQty: 0,
       closingValue: 0,
-    }
+    },
   );
 
   return { rows, totals };
@@ -248,7 +450,9 @@ async function isStockGroup(companyId, groupId) {
   const groups = await Groups.find({ companyId }).toArray();
   const groupById = new Map(groups.map((group) => [String(group._id), group]));
   const stockRoot = groups.find((group) =>
-    ["stock-in-trade", "stock in trade", "primary"].includes(nameKey(group.name))
+    ["stock-in-trade", "stock in trade", "primary"].includes(
+      nameKey(group.name),
+    ),
   );
 
   if (!stockRoot) return false;
@@ -512,14 +716,45 @@ async function seedDefaultMasters(companyId) {
 app.post("/companies", async (req, res) => {
   try {
     const name = normalizeName(req.body.name);
-    const { financialYearFrom, financialYearTo } = req.body;
+    const {
+      financialYearFrom,
+      financialYearTo,
+      booksBeginningFrom,
+      mailingName,
+      country,
+      address,
+      state,
+      city,
+      postalCode,
+      telephone,
+      mobile,
+      fax,
+      email,
+      website,
+      division,
+      baseCurrencySymbol,
+      formalName,
+      decimalPlaces,
+      incomeTaxNumber,
+      vatTinNumber,
+      serviceTaxNumber,
+      panNumber,
+      enableInventoryManagement,
+      enableBillWiseDetails,
+      enableCostCentres,
+      enableMultiCurrency,
+    } = req.body;
     if (!name) {
       return res.status(400).json({ message: "Company name is required" });
     }
 
-    const existing = await Companies.findOne({ name: new RegExp(`^${name}$`, "i") });
+    const existing = await Companies.findOne({
+      name: new RegExp(`^${name}$`, "i"),
+    });
     if (existing) {
-      return res.status(400).json({ message: "A company with this name already exists" });
+      return res
+        .status(400)
+        .json({ message: "A company with this name already exists" });
     }
 
     const now = new Date();
@@ -527,6 +762,32 @@ app.post("/companies", async (req, res) => {
       name,
       financialYearFrom,
       financialYearTo,
+      booksBeginningFrom,
+      mailingName,
+      country,
+      address,
+      state,
+      city,
+      postalCode,
+      telephone,
+      mobile,
+      fax,
+      email,
+      website,
+      division,
+      baseCurrencySymbol: baseCurrencySymbol || "TK",
+      formalName: formalName || "Bangladeshi Taka",
+      decimalPlaces: Number(decimalPlaces || 2),
+      incomeTaxNumber,
+      vatTinNumber,
+      serviceTaxNumber,
+      panNumber,
+      options: {
+        enableInventoryManagement: enableInventoryManagement !== false,
+        enableBillWiseDetails: Boolean(enableBillWiseDetails),
+        enableCostCentres: Boolean(enableCostCentres),
+        enableMultiCurrency: Boolean(enableMultiCurrency),
+      },
       createdAt: now,
     });
 
@@ -557,14 +818,15 @@ app.get("/companies/:companyId/masters/overview", async (req, res) => {
     const companyId = new ObjectId(req.params.companyId);
     await ensureCompanyCoreMasters(companyId);
 
-    const [company, groups, ledgers, items, voucherTypes, levels] = await Promise.all([
-      Companies.findOne({ _id: companyId }),
-      Groups.find({ companyId }).sort({ name: 1 }).toArray(),
-      Ledgers.find({ companyId }).sort({ name: 1 }).toArray(),
-      Items.find({ companyId }).sort({ name: 1 }).toArray(),
-      VoucherTypes.find({ companyId }).sort({ name: 1 }).toArray(),
-      pricelevels.find({ companyId }).sort({ code: 1 }).toArray(),
-    ]);
+    const [company, groups, ledgers, items, voucherTypes, levels] =
+      await Promise.all([
+        Companies.findOne({ _id: companyId }),
+        Groups.find({ companyId }).sort({ name: 1 }).toArray(),
+        Ledgers.find({ companyId }).sort({ name: 1 }).toArray(),
+        Items.find({ companyId }).sort({ name: 1 }).toArray(),
+        VoucherTypes.find({ companyId }).sort({ name: 1 }).toArray(),
+        pricelevels.find({ companyId }).sort({ code: 1 }).toArray(),
+      ]);
 
     if (!company) {
       return res.status(404).json({ message: "Company not found" });
@@ -581,6 +843,69 @@ app.get("/companies/:companyId/masters/overview", async (req, res) => {
   } catch (err) {
     console.error("Error loading company overview:", err);
     res.status(500).json({ message: "Error loading company overview" });
+  }
+});
+
+app.put("/companies/:companyId", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const name = normalizeName(req.body.name);
+    if (!name) {
+      return res.status(400).json({ message: "Company name is required" });
+    }
+
+    const existing = await Companies.findOne({
+      _id: { $ne: companyId },
+      name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
+    });
+    if (existing) {
+      return res
+        .status(400)
+        .json({ message: "A company with this name already exists" });
+    }
+
+    const update = {
+      $set: {
+        name,
+        financialYearFrom: req.body.financialYearFrom || "",
+        financialYearTo: req.body.financialYearTo || "",
+        booksBeginningFrom: req.body.booksBeginningFrom || "",
+        mailingName: req.body.mailingName || "",
+        country: req.body.country || "",
+        address: req.body.address || "",
+        state: req.body.state || "",
+        city: req.body.city || "",
+        postalCode: req.body.postalCode || "",
+        telephone: req.body.telephone || "",
+        mobile: req.body.mobile || "",
+        fax: req.body.fax || "",
+        email: req.body.email || "",
+        website: req.body.website || "",
+        division: req.body.division || "",
+        baseCurrencySymbol: req.body.baseCurrencySymbol || "TK",
+        formalName: req.body.formalName || "Bangladeshi Taka",
+        decimalPlaces: Number(req.body.decimalPlaces || 2),
+        incomeTaxNumber: req.body.incomeTaxNumber || "",
+        vatTinNumber: req.body.vatTinNumber || "",
+        serviceTaxNumber: req.body.serviceTaxNumber || "",
+        panNumber: req.body.panNumber || "",
+        options: {
+          enableInventoryManagement:
+            req.body.enableInventoryManagement !== false,
+          enableBillWiseDetails: Boolean(req.body.enableBillWiseDetails),
+          enableCostCentres: Boolean(req.body.enableCostCentres),
+          enableMultiCurrency: Boolean(req.body.enableMultiCurrency),
+        },
+        updatedAt: new Date(),
+      },
+    };
+
+    await Companies.updateOne({ _id: companyId }, update);
+    const company = await Companies.findOne({ _id: companyId });
+    res.json(company);
+  } catch (err) {
+    console.error("Error updating company:", err);
+    res.status(500).json({ message: "Error updating company" });
   }
 });
 
@@ -605,14 +930,20 @@ app.post("/companies/:companyId/groups", async (req, res) => {
 
     const duplicate = await Groups.findOne({
       companyId,
-      name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" },
+      name: {
+        $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        $options: "i",
+      },
     });
     if (duplicate) {
       return res.status(400).json({ message: "Group name already exists" });
     }
 
     if (parentId) {
-      const parent = await Groups.findOne({ _id: new ObjectId(parentId), companyId });
+      const parent = await Groups.findOne({
+        _id: new ObjectId(parentId),
+        companyId,
+      });
       if (!parent) {
         return res.status(400).json({ message: "Parent group not found" });
       }
@@ -649,7 +980,10 @@ app.put("/companies/:companyId/groups/:groupId", async (req, res) => {
     const duplicate = await Groups.findOne({
       _id: { $ne: groupId },
       companyId,
-      name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" },
+      name: {
+        $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        $options: "i",
+      },
     });
     if (duplicate) {
       return res.status(400).json({ message: "Group name already exists" });
@@ -658,7 +992,9 @@ app.put("/companies/:companyId/groups/:groupId", async (req, res) => {
     if (parentId) {
       const parentObjectId = new ObjectId(parentId);
       if (String(parentObjectId) === String(groupId)) {
-        return res.status(400).json({ message: "Group cannot be parent of itself" });
+        return res
+          .status(400)
+          .json({ message: "Group cannot be parent of itself" });
       }
       const parent = await Groups.findOne({ _id: parentObjectId, companyId });
       if (!parent) {
@@ -694,7 +1030,9 @@ app.delete("/companies/:companyId/groups/:groupId", async (req, res) => {
       return res.status(404).json({ message: "Group not found" });
     }
     if (existingGroup.isSystem) {
-      return res.status(400).json({ message: "System groups cannot be deleted" });
+      return res
+        .status(400)
+        .json({ message: "System groups cannot be deleted" });
     }
 
     const ledgerCount = await Ledgers.countDocuments({ companyId, groupId });
@@ -747,24 +1085,31 @@ app.get("/companies/:companyId/ledgers/defaults", async (req, res) => {
       Ledgers.find({ companyId }).toArray(),
       Groups.find({ companyId }).toArray(),
     ]);
-    const groupById = new Map(groups.map((group) => [String(group._id), group]));
+    const groupById = new Map(
+      groups.map((group) => [String(group._id), group]),
+    );
 
     res.json({
-      salesLedger: ledgers.find((ledger) => nameKey(ledger.name) === "sales") || null,
+      salesLedger:
+        ledgers.find((ledger) => nameKey(ledger.name) === "sales") || null,
       purchaseLedger:
         ledgers.find((ledger) => nameKey(ledger.name) === "purchase") || null,
-      cashLedger: ledgers.find((ledger) => nameKey(ledger.name) === "cash") || null,
+      cashLedger:
+        ledgers.find((ledger) => nameKey(ledger.name) === "cash") || null,
       bankLedgers: ledgers.filter(
         (ledger) =>
-          nameKey(groupById.get(String(ledger.groupId))?.name) === "bank accounts"
+          nameKey(groupById.get(String(ledger.groupId))?.name) ===
+          "bank accounts",
       ),
       debtorLedgers: ledgers.filter(
         (ledger) =>
-          nameKey(groupById.get(String(ledger.groupId))?.name) === "sundry debtors"
+          nameKey(groupById.get(String(ledger.groupId))?.name) ===
+          "sundry debtors",
       ),
       creditorLedgers: ledgers.filter(
         (ledger) =>
-          nameKey(groupById.get(String(ledger.groupId))?.name) === "sundry creditors"
+          nameKey(groupById.get(String(ledger.groupId))?.name) ===
+          "sundry creditors",
       ),
     });
   } catch (err) {
@@ -834,17 +1179,25 @@ app.post("/companies/:companyId/ledgers", async (req, res) => {
       priceLevelId = null,
     } = req.body;
     if (!name || !groupId) {
-      return res.status(400).json({ message: "Ledger name and group are required" });
+      return res
+        .status(400)
+        .json({ message: "Ledger name and group are required" });
     }
 
-    const group = await Groups.findOne({ _id: new ObjectId(groupId), companyId });
+    const group = await Groups.findOne({
+      _id: new ObjectId(groupId),
+      companyId,
+    });
     if (!group) {
       return res.status(400).json({ message: "Group not found" });
     }
 
     const duplicate = await Ledgers.findOne({
       companyId,
-      name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" },
+      name: {
+        $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        $options: "i",
+      },
     });
     if (duplicate) {
       return res.status(400).json({ message: "Ledger name already exists" });
@@ -880,7 +1233,10 @@ app.put("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
     }
 
     if (groupId) {
-      const group = await Groups.findOne({ _id: new ObjectId(groupId), companyId });
+      const group = await Groups.findOne({
+        _id: new ObjectId(groupId),
+        companyId,
+      });
       if (!group) {
         return res.status(400).json({ message: "Group not found" });
       }
@@ -889,7 +1245,10 @@ app.put("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
     const duplicate = await Ledgers.findOne({
       _id: { $ne: ledgerId },
       companyId,
-      name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" },
+      name: {
+        $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        $options: "i",
+      },
     });
     if (duplicate) {
       return res.status(400).json({ message: "Ledger name already exists" });
@@ -902,13 +1261,14 @@ app.put("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
         openingBalance:
           openingBalance !== undefined ? Number(openingBalance) : undefined,
         openingDrCr,
-        priceLevelId: priceLevelId !== undefined ? priceLevelId || null : undefined,
+        priceLevelId:
+          priceLevelId !== undefined ? priceLevelId || null : undefined,
       },
     };
 
     // Clean undefined keys
     Object.keys(update.$set).forEach(
-      (k) => update.$set[k] === undefined && delete update.$set[k]
+      (k) => update.$set[k] === undefined && delete update.$set[k],
     );
 
     await Ledgers.updateOne({ _id: ledgerId, companyId }, update);
@@ -930,7 +1290,9 @@ app.delete("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
       return res.status(404).json({ message: "Ledger not found" });
     }
     if (existingLedger.isSystem) {
-      return res.status(400).json({ message: "System ledgers cannot be deleted" });
+      return res
+        .status(400)
+        .json({ message: "System ledgers cannot be deleted" });
     }
 
     const used = await Vouchers.countDocuments({
@@ -998,7 +1360,7 @@ app.put(
       console.error("Error updating voucher type:", err);
       res.status(500).json({ message: "Error updating voucher type" });
     }
-  }
+  },
 );
 
 // Delete voucher type (if not used)
@@ -1022,7 +1384,7 @@ app.delete(
       console.error("Error deleting voucher type:", err);
       res.status(500).json({ message: "Error deleting voucher type" });
     }
-  }
+  },
 );
 
 // ---------- VOUCHERS (create / alter / delete) ----------
@@ -1031,7 +1393,7 @@ app.delete(
 // GET vouchers for a company + voucher type
 app.get("/companies/:companyId/vouchers", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
-  const { type } = req.query; // voucherTypeId
+  const { type, from, to } = req.query;
 
   const filter = { companyId };
 
@@ -1039,8 +1401,38 @@ app.get("/companies/:companyId/vouchers", async (req, res) => {
     filter.voucherTypeId = new ObjectId(type);
   }
 
-  const list = await Vouchers.find(filter).toArray();
+  const fromDate = safeDate(from);
+  const toDate = safeDate(to);
+
+  if (fromDate || toDate) {
+    filter.date = {};
+    if (fromDate) filter.date.$gte = fromDate;
+    if (toDate) {
+      const inclusiveTo = new Date(toDate);
+      inclusiveTo.setHours(23, 59, 59, 999);
+      filter.date.$lte = inclusiveTo;
+    }
+  }
+
+  const list = await Vouchers.find(filter)
+    .sort({ date: -1, createdAt: -1 })
+    .toArray();
   res.json(list);
+});
+
+app.get("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const voucherId = new ObjectId(req.params.voucherId);
+    const voucher = await Vouchers.findOne({ _id: voucherId, companyId });
+    if (!voucher) {
+      return res.status(404).json({ message: "Voucher not found" });
+    }
+    res.json(voucher);
+  } catch (err) {
+    console.error("Error loading voucher:", err);
+    res.status(500).json({ message: "Error loading voucher" });
+  }
 });
 
 // Create voucher (like Tally: one header + many lines)
@@ -1137,8 +1529,15 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const voucherId = new ObjectId(req.params.voucherId);
-    const { voucherTypeId, voucherName, number, date, narration, lines, inventoryLines } =
-      req.body;
+    const {
+      voucherTypeId,
+      voucherName,
+      number,
+      date,
+      narration,
+      lines,
+      inventoryLines,
+    } = req.body;
 
     const update = { $set: {} };
 
@@ -1176,11 +1575,14 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
         .filter((line) => line?.itemId)
         .map((line) => ({
           itemId: new ObjectId(line.itemId),
-          itemName: normalizeName(line.itemName || line.productSnapshot?.name || ""),
+          itemName: normalizeName(
+            line.itemName || line.productSnapshot?.name || "",
+          ),
           qty: Number(line.qty) || 0,
           rate: Number(line.rate) || 0,
           amount:
-            Number(line.amount) || (Number(line.qty) || 0) * (Number(line.rate) || 0),
+            Number(line.amount) ||
+            (Number(line.qty) || 0) * (Number(line.rate) || 0),
           billedQty: Number(line.billedQty) || Number(line.qty) || 0,
           discount: Number(line.discount) || 0,
         }));
@@ -1212,6 +1614,7 @@ app.delete("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
 // Get next voucher number for a voucher type
 app.get("/companies/:companyId/vouchers/next-number", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
+  console.log(companyId);
   const { voucherTypeId } = req.query;
 
   if (!voucherTypeId) {
@@ -1269,7 +1672,7 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
 
     const openingMap = new Map();
     openingMoves.forEach((m) =>
-      openingMap.set(String(m._id), (m.debit || 0) - (m.credit || 0))
+      openingMap.set(String(m._id), (m.debit || 0) - (m.credit || 0)),
     );
 
     // -----------------------------------------------------
@@ -1340,6 +1743,8 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
       return {
         ledgerId: l._id,
         ledgerName: l.name,
+        groupId: l.group?._id || null,
+        parentGroupId: l.group?.parentId || null,
         groupName: l.group?.name,
         nature: l.group?.nature,
         opening: normalizeMoney(opening),
@@ -1353,14 +1758,38 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
       };
     });
 
+    const groups = await Groups.find({ companyId }).toArray();
+    const tree = buildGroupedBalanceTree(
+      groups,
+      rows.map((row) => ({
+        _id: row.ledgerId,
+        name: row.ledgerName,
+        groupId: row.groupId,
+        openingDebit: row.openingDebit,
+        openingCredit: row.openingCredit,
+        debit: row.debit,
+        credit: row.credit,
+        closingDebit: row.closingDebit,
+        closingCredit: row.closingCredit,
+      })),
+    );
+
     const totals = rows.reduce(
       (accumulator, row) => ({
-        openingDebit: normalizeMoney(accumulator.openingDebit + row.openingDebit),
-        openingCredit: normalizeMoney(accumulator.openingCredit + row.openingCredit),
+        openingDebit: normalizeMoney(
+          accumulator.openingDebit + row.openingDebit,
+        ),
+        openingCredit: normalizeMoney(
+          accumulator.openingCredit + row.openingCredit,
+        ),
         debit: normalizeMoney(accumulator.debit + row.debit),
         credit: normalizeMoney(accumulator.credit + row.credit),
-        closingDebit: normalizeMoney(accumulator.closingDebit + row.closingDebit),
-        closingCredit: normalizeMoney(accumulator.closingCredit + row.closingCredit),
+        closingDebit: normalizeMoney(
+          accumulator.closingDebit + row.closingDebit,
+        ),
+        closingCredit: normalizeMoney(
+          accumulator.closingCredit + row.closingCredit,
+        ),
       }),
       {
         openingDebit: 0,
@@ -1369,10 +1798,15 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
         credit: 0,
         closingDebit: 0,
         closingCredit: 0,
-      }
+      },
     );
 
-    res.json({ rows, totals });
+    res.json({
+      rows,
+      tree,
+      flattened: flattenGroupTree(tree),
+      totals,
+    });
   } catch (err) {
     console.error("Error building trial balance:", err);
     res.status(500).json({ message: "Error building trial balance" });
@@ -1410,6 +1844,12 @@ app.post("/companies/:companyId/items", async (req, res) => {
       name,
       alias,
       groupId,
+      stockCategory,
+      unitOfMeasure,
+      description,
+      notes,
+      picture,
+      narration,
       openingQty,
       openingRate,
       openingValue,
@@ -1417,15 +1857,22 @@ app.post("/companies/:companyId/items", async (req, res) => {
     } = req.body;
     const normalizedName = normalizeName(name);
     if (!normalizedName || !groupId) {
-      return res.status(400).json({ message: "Item name and group are required" });
+      return res
+        .status(400)
+        .json({ message: "Item name and group are required" });
     }
 
-    const group = await Groups.findOne({ _id: new ObjectId(groupId), companyId });
+    const group = await Groups.findOne({
+      _id: new ObjectId(groupId),
+      companyId,
+    });
     if (!group) {
       return res.status(400).json({ message: "Stock group not found" });
     }
     if (!(await isStockGroup(companyId, group._id))) {
-      return res.status(400).json({ message: "Items must be created under a stock group" });
+      return res
+        .status(400)
+        .json({ message: "Items must be created under a stock group" });
     }
 
     const duplicate = await Items.findOne({
@@ -1444,6 +1891,12 @@ app.post("/companies/:companyId/items", async (req, res) => {
       name: normalizedName,
       alias: normalizeName(alias),
       groupId: new ObjectId(groupId),
+      stockCategory: normalizeName(stockCategory),
+      unitOfMeasure: normalizeName(unitOfMeasure),
+      description: normalizeName(description),
+      notes: normalizeName(notes),
+      picture: picture || "",
+      narration: normalizeName(narration),
       openingQty: Number(openingQty) || 0,
       openingRate: Number(openingRate) || 0,
       openingValue: Number(openingValue) || 0,
@@ -1470,13 +1923,21 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
       name,
       alias,
       groupId,
+      stockCategory,
+      unitOfMeasure,
+      description,
+      notes,
+      picture,
+      narration,
       openingQty,
       openingRate,
       prices, // NEW
     } = req.body;
     const normalizedName = normalizeName(name);
     if (!normalizedName || !groupId) {
-      return res.status(400).json({ message: "Item name and group are required" });
+      return res
+        .status(400)
+        .json({ message: "Item name and group are required" });
     }
 
     const duplicate = await Items.findOne({
@@ -1490,12 +1951,17 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
     if (duplicate) {
       return res.status(400).json({ message: "Item name already exists" });
     }
-    const group = await Groups.findOne({ _id: new ObjectId(groupId), companyId });
+    const group = await Groups.findOne({
+      _id: new ObjectId(groupId),
+      companyId,
+    });
     if (!group) {
       return res.status(400).json({ message: "Stock group not found" });
     }
     if (!(await isStockGroup(companyId, group._id))) {
-      return res.status(400).json({ message: "Items must be created under a stock group" });
+      return res
+        .status(400)
+        .json({ message: "Items must be created under a stock group" });
     }
 
     const openingValue = Number(openingQty) * Number(openingRate);
@@ -1505,6 +1971,12 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
         name: normalizedName,
         alias: normalizeName(alias),
         groupId: new ObjectId(groupId),
+        stockCategory: normalizeName(stockCategory),
+        unitOfMeasure: normalizeName(unitOfMeasure),
+        description: normalizeName(description),
+        notes: normalizeName(notes),
+        picture: picture || "",
+        narration: normalizeName(narration),
         openingQty: Number(openingQty),
         openingRate: Number(openingRate),
         openingValue,
@@ -1526,7 +1998,7 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
 app.put("/companies/:companyId/update-prices-by-group", async (req, res) => {
   try {
     const { companyId } = req.params;
-    const { groupId, priceLevelId, rate } = req.body;
+    const { groupId, priceLevelId, rate, effectiveFrom } = req.body;
 
     // ----------- VALIDATION -----------
     if (!companyId || !groupId || !priceLevelId || rate === undefined) {
@@ -1538,6 +2010,9 @@ app.put("/companies/:companyId/update-prices-by-group", async (req, res) => {
     if (isNaN(rate)) {
       return res.status(400).json({ message: "Rate must be a number" });
     }
+
+    const effectiveDate = safeDate(effectiveFrom) || new Date();
+    const effectiveDateKey = effectiveDate.toISOString().slice(0, 10);
 
     let companyObjectId, groupObjectId;
 
@@ -1576,49 +2051,54 @@ app.put("/companies/:companyId/update-prices-by-group", async (req, res) => {
     };
 
     const allGroupIds = await getAllChildGroupIds(groupObjectId);
+    const targetItems = await Items.find({
+      companyId: companyObjectId,
+      groupId: { $in: allGroupIds },
+    }).toArray();
 
-    console.log("ALL GROUPS TO UPDATE:", allGroupIds);
+    let addedPriceLevels = 0;
+    let updatedPriceLevels = 0;
 
-    // ----------- STEP 1: ADD priceLevel IF MISSING -----------
-    const addResult = await Items.updateMany(
-      {
-        companyId: companyObjectId,
-        groupId: { $in: allGroupIds },
-        prices: { $not: { $elemMatch: { priceLevelId: priceLevelId } } },
-      },
-      {
-        $push: {
-          prices: { priceLevelId, rate: Number(rate) },
-        },
+    for (const item of targetItems) {
+      const prices = Array.isArray(item.prices) ? [...item.prices] : [];
+      const existingIndex = prices.findIndex((entry) => {
+        const entryDateKey = entry?.effectiveFrom
+          ? new Date(entry.effectiveFrom).toISOString().slice(0, 10)
+          : "";
+        return (
+          entry?.priceLevelId === priceLevelId &&
+          entryDateKey === effectiveDateKey
+        );
+      });
+
+      if (existingIndex >= 0) {
+        prices[existingIndex] = {
+          ...prices[existingIndex],
+          rate: Number(rate),
+          effectiveFrom: effectiveDate,
+        };
+        updatedPriceLevels += 1;
+      } else {
+        prices.push({
+          priceLevelId,
+          rate: Number(rate),
+          effectiveFrom: effectiveDate,
+        });
+        addedPriceLevels += 1;
       }
-    );
 
-    console.log("Added missing price level to:", addResult.modifiedCount);
-
-    // ----------- STEP 2: UPDATE EXISTING PRICE LEVELS -----------
-    const updateResult = await Items.updateMany(
-      {
-        companyId: companyObjectId,
-        groupId: { $in: allGroupIds },
-      },
-      {
-        $set: {
-          "prices.$[elem].rate": Number(rate),
-        },
-      },
-      {
-        arrayFilters: [{ "elem.priceLevelId": priceLevelId }], // STRING compare
-      }
-    );
-
-    console.log("Updated existing price levels:", updateResult.modifiedCount);
+      await Items.updateOne(
+        { _id: item._id, companyId: companyObjectId },
+        { $set: { prices } },
+      );
+    }
 
     res.json({
       message: "Bulk price update completed",
-      addedPriceLevels: addResult.modifiedCount,
-      updatedPriceLevels: updateResult.modifiedCount,
+      effectiveFrom: effectiveDateKey,
+      addedPriceLevels,
+      updatedPriceLevels,
     });
-
   } catch (err) {
     console.error("❌ Bulk update error:", err);
     res.status(500).json({
@@ -1627,7 +2107,6 @@ app.put("/companies/:companyId/update-prices-by-group", async (req, res) => {
     });
   }
 });
-
 
 // Delete item (guard: not used in vouchers)
 app.delete("/companies/:companyId/items/:itemId", async (req, res) => {
@@ -1880,7 +2359,7 @@ app.get(
       console.error("Error loading stock item tree:", err);
       res.status(500).json({ message: "Error loading stock item structure" });
     }
-  }
+  },
 );
 
 app.get("/companies/:companyId/reports/stock-summary", async (req, res) => {
@@ -1895,19 +2374,191 @@ app.get("/companies/:companyId/reports/stock-summary", async (req, res) => {
   }
 });
 
+app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await ensureCompanyCoreMasters(companyId);
+    const fromDate = safeDate(req.query.from);
+    const toDate = safeDate(req.query.to);
+
+    const [groups, vouchers, ledgers] = await Promise.all([
+      Groups.find({ companyId }).toArray(),
+      Vouchers.find({ companyId }).toArray(),
+      Ledgers.aggregate([
+        { $match: { companyId } },
+        {
+          $lookup: {
+            from: "groups",
+            localField: "groupId",
+            foreignField: "_id",
+            as: "group",
+          },
+        },
+        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+      ]).toArray(),
+    ]);
+
+    const balances = summarizeLedgerBalances(
+      ledgers,
+      vouchers,
+      fromDate,
+      toDate,
+    );
+    const groupMap = new Map(groups.map((group) => [String(group._id), group]));
+
+    const incomes = [];
+    const expenses = [];
+
+    balances.forEach((ledger) => {
+      const group = groupMap.get(String(ledger.groupId)) || ledger.group;
+      const amount =
+        group?.nature === "INCOME"
+          ? normalizeMoney((ledger.credit || 0) - (ledger.debit || 0))
+          : normalizeMoney((ledger.debit || 0) - (ledger.credit || 0));
+
+      const row = {
+        ledgerId: ledger._id,
+        ledgerName: ledger.name,
+        groupName: group?.name || "",
+        amount: normalizeMoney(Math.max(amount, 0)),
+        affectsGrossProfit: Boolean(group?.affectsGrossProfit),
+      };
+
+      if (group?.nature === "INCOME" && row.amount > 0) incomes.push(row);
+      if (group?.nature === "EXPENSE" && row.amount > 0) expenses.push(row);
+    });
+
+    const grossIncome = incomes
+      .filter((row) => row.affectsGrossProfit)
+      .reduce((sum, row) => normalizeMoney(sum + row.amount), 0);
+    const grossExpense = expenses
+      .filter((row) => row.affectsGrossProfit)
+      .reduce((sum, row) => normalizeMoney(sum + row.amount), 0);
+    const netIncome = incomes
+      .filter((row) => !row.affectsGrossProfit)
+      .reduce((sum, row) => normalizeMoney(sum + row.amount), 0);
+    const netExpense = expenses
+      .filter((row) => !row.affectsGrossProfit)
+      .reduce((sum, row) => normalizeMoney(sum + row.amount), 0);
+
+    const grossProfit = normalizeMoney(grossIncome - grossExpense);
+    const netProfit = normalizeMoney(grossProfit + netIncome - netExpense);
+
+    res.json({
+      incomes: incomes.sort((a, b) => a.ledgerName.localeCompare(b.ledgerName)),
+      expenses: expenses.sort((a, b) =>
+        a.ledgerName.localeCompare(b.ledgerName),
+      ),
+      totals: {
+        grossIncome,
+        grossExpense,
+        grossProfit,
+        netIncome,
+        netExpense,
+        netProfit,
+      },
+    });
+  } catch (err) {
+    console.error("Error building profit and loss:", err);
+    res.status(500).json({ message: "Error building profit and loss" });
+  }
+});
+
 app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await ensureCompanyCoreMasters(companyId);
 
-    const [groupsCount, ledgersCount, itemsCount, vouchersCount, stockSummary] =
-      await Promise.all([
-        Groups.countDocuments({ companyId }),
-        Ledgers.countDocuments({ companyId }),
-        Items.countDocuments({ companyId }),
-        Vouchers.countDocuments({ companyId }),
-        buildStockSummary(companyId),
-      ]);
+    const [
+      groupsCount,
+      ledgersCount,
+      itemsCount,
+      vouchersCount,
+      stockSummary,
+      vouchers,
+      ledgers,
+    ] = await Promise.all([
+      Groups.countDocuments({ companyId }),
+      Ledgers.countDocuments({ companyId }),
+      Items.countDocuments({ companyId }),
+      Vouchers.countDocuments({ companyId }),
+      buildStockSummary(companyId),
+      Vouchers.find({ companyId }).toArray(),
+      Ledgers.aggregate([
+        { $match: { companyId } },
+        {
+          $lookup: {
+            from: "groups",
+            localField: "groupId",
+            foreignField: "_id",
+            as: "group",
+          },
+        },
+        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+      ]).toArray(),
+    ]);
+
+    const balances = summarizeLedgerBalances(ledgers, vouchers, null, null);
+    const cashBank = balances
+      .filter((row) =>
+        ["cash-in-hand", "bank accounts"].includes(
+          nameKey(row.group?.name || ""),
+        ),
+      )
+      .reduce((sum, row) => normalizeMoney(sum + row.closing), 0);
+
+    const receivables = balances
+      .filter((row) => nameKey(row.group?.name || "") === "sundry debtors")
+      .reduce((sum, row) => normalizeMoney(sum + row.closingDebit), 0);
+
+    const payables = balances
+      .filter((row) => nameKey(row.group?.name || "") === "sundry creditors")
+      .reduce((sum, row) => normalizeMoney(sum + row.closingCredit), 0);
+
+    const salesTotal = balances
+      .filter((row) => nameKey(row.group?.name || "") === "sales accounts")
+      .reduce((sum, row) => normalizeMoney(sum + row.credit - row.debit), 0);
+
+    const purchaseTotal = balances
+      .filter((row) => nameKey(row.group?.name || "") === "purchase accounts")
+      .reduce((sum, row) => normalizeMoney(sum + row.debit - row.credit), 0);
+
+    const directIncome = balances
+      .filter(
+        (row) =>
+          row.group?.nature === "INCOME" &&
+          Boolean(row.group?.affectsGrossProfit),
+      )
+      .reduce((sum, row) => normalizeMoney(sum + row.credit - row.debit), 0);
+
+    const directExpense = balances
+      .filter(
+        (row) =>
+          row.group?.nature === "EXPENSE" &&
+          Boolean(row.group?.affectsGrossProfit),
+      )
+      .reduce((sum, row) => normalizeMoney(sum + row.debit - row.credit), 0);
+
+    const indirectIncome = balances
+      .filter(
+        (row) =>
+          row.group?.nature === "INCOME" &&
+          !Boolean(row.group?.affectsGrossProfit),
+      )
+      .reduce((sum, row) => normalizeMoney(sum + row.credit - row.debit), 0);
+
+    const indirectExpense = balances
+      .filter(
+        (row) =>
+          row.group?.nature === "EXPENSE" &&
+          !Boolean(row.group?.affectsGrossProfit),
+      )
+      .reduce((sum, row) => normalizeMoney(sum + row.debit - row.credit), 0);
+
+    const grossProfit = normalizeMoney(directIncome - directExpense);
+    const netProfit = normalizeMoney(
+      grossProfit + indirectIncome - indirectExpense,
+    );
 
     res.json({
       groupsCount,
@@ -1917,6 +2568,17 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
       stockValue: stockSummary.totals.closingValue,
       stockQuantity: stockSummary.totals.closingQty,
       stockItems: stockSummary.rows.slice(0, 8),
+      cashBankBalance: cashBank,
+      receivables,
+      payables,
+      salesTotal,
+      purchaseTotal,
+      grossProfit,
+      netProfit,
+      recentVouchers: vouchers
+        .slice()
+        .sort((left, right) => new Date(right.date) - new Date(left.date))
+        .slice(0, 6),
     });
   } catch (err) {
     console.error("Error loading dashboard report:", err);
@@ -1997,7 +2659,7 @@ app.get(
       console.error("Error loading stock groups:", err);
       res.status(500).json({ message: "Error loading stock group list" });
     }
-  }
+  },
 );
 
 app.post("/companies/:companyId/price-levels", async (req, res) => {
@@ -2044,7 +2706,7 @@ app.put("/companies/:companyId/price-levels/:id", async (req, res) => {
 
     await pricelevels.updateOne(
       { _id: id, companyId },
-      { $set: { code, name } }
+      { $set: { code, name } },
     );
 
     const updated = await pricelevels.findOne({ _id: id, companyId });
@@ -2063,7 +2725,9 @@ app.delete("/companies/:companyId/price-levels/:id", async (req, res) => {
       return res.status(404).json({ message: "Price level not found" });
     }
     if (existingLevel.isSystem) {
-      return res.status(400).json({ message: "System price levels cannot be deleted" });
+      return res
+        .status(400)
+        .json({ message: "System price levels cannot be deleted" });
     }
 
     await pricelevels.deleteOne({ _id: id, companyId });
