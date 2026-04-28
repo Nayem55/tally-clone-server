@@ -4216,6 +4216,16 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
     ]);
 
     const balances = summarizeLedgerBalances(ledgers, vouchers, null, null);
+    const monthLabels = [];
+    const monthMap = new Map();
+    for (let index = 11; index >= 0; index -= 1) {
+      const date = dayjs().subtract(index, "month");
+      const key = date.format("YYYY-MM");
+      const label = date.format("MMM");
+      monthLabels.push({ key, label });
+      monthMap.set(key, { label, sales: 0, purchase: 0 });
+    }
+
     const cashBank = balances
       .filter((row) =>
         ["cash-in-hand", "bank accounts"].includes(
@@ -4277,11 +4287,73 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
       grossProfit + indirectIncome - indirectExpense,
     );
 
+    vouchers.forEach((voucher) => {
+      const voucherDate = voucher?.date ? dayjs(voucher.date) : null;
+      if (!voucherDate?.isValid()) return;
+      const key = voucherDate.format("YYYY-MM");
+      if (!monthMap.has(key)) return;
+      const current = monthMap.get(key);
+      const amount = voucherTotalAmount(voucher);
+      const voucherKey = nameKey(voucher.voucherName || "");
+
+      if (voucherKey === "sales" || voucherKey === "pos voucher") {
+        current.sales = normalizeMoney(current.sales + amount);
+      }
+      if (voucherKey === "purchase") {
+        current.purchase = normalizeMoney(current.purchase + amount);
+      }
+      monthMap.set(key, current);
+    });
+
+    const currentAssets = balances
+      .filter((row) => nameKey(row.group?.parentId ? "" : row.group?.name || "") === "current assets")
+      .reduce((sum, row) => normalizeMoney(sum + row.closingDebit), 0);
+
+    const currentLiabilities = balances
+      .filter((row) => nameKey(row.group?.parentId ? "" : row.group?.name || "") === "current liabilities")
+      .reduce((sum, row) => normalizeMoney(sum + row.closingCredit), 0);
+
+    const cashInHandTotal = balances
+      .filter((row) => nameKey(row.group?.name || "") === "cash-in-hand")
+      .reduce((sum, row) => normalizeMoney(sum + row.closingDebit), 0);
+
+    const bankBalanceTotal = balances
+      .filter((row) => nameKey(row.group?.name || "") === "bank accounts")
+      .reduce((sum, row) => normalizeMoney(sum + row.closingDebit), 0);
+
+    const bankLedgers = balances
+      .filter((row) => nameKey(row.group?.name || "") === "bank accounts")
+      .map((row) => ({
+        ledgerId: row._id,
+        ledgerName: row.name,
+        closingBalance: normalizeMoney(row.closingDebit || row.closing),
+      }))
+      .sort((left, right) => right.closingBalance - left.closingBalance)
+      .slice(0, 5);
+
+    const averageInventory = normalizeMoney(
+      ((Number(stockSummary.totals.openingValue || 0) + Number(stockSummary.totals.closingValue || 0)) / 2) || 0,
+    );
+    const inventoryTurnover = averageInventory
+      ? normalizeMoney(Number(stockSummary.totals.outwardValue || 0) / averageInventory)
+      : 0;
+    const receivableTurnoverDays = salesTotal
+      ? normalizeMoney((receivables / salesTotal) * 365)
+      : 0;
+    const debtEquityRatio = netProfit
+      ? normalizeMoney(payables / Math.max(Math.abs(netProfit), 1))
+      : 0;
+    const returnOnInvestment = currentAssets
+      ? normalizeMoney((netProfit / currentAssets) * 100)
+      : 0;
+
     res.json({
       groupsCount,
       ledgersCount,
       itemsCount,
       vouchersCount,
+      cashInHandBalance: cashInHandTotal,
+      bankBalance: bankBalanceTotal,
       stockValue: stockSummary.totals.closingValue,
       stockQuantity: stockSummary.totals.closingQty,
       stockItems: stockSummary.rows.slice(0, 8),
@@ -4292,6 +4364,58 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
       purchaseTotal,
       grossProfit,
       netProfit,
+      salesTrend: monthLabels.map(({ key, label }) => ({
+        label,
+        value: monthMap.get(key)?.sales || 0,
+      })),
+      purchaseTrend: monthLabels.map(({ key, label }) => ({
+        label,
+        value: monthMap.get(key)?.purchase || 0,
+      })),
+      cashFlow: {
+        netInflow: normalizeMoney(cashBank),
+        totalInflow: balances.reduce(
+          (sum, row) => normalizeMoney(sum + Number(row.debit || 0)),
+          0,
+        ),
+        totalOutflow: balances.reduce(
+          (sum, row) => normalizeMoney(sum + Number(row.credit || 0)),
+          0,
+        ),
+      },
+      topBankLedgers: bankLedgers,
+      assetsLiabilities: {
+        currentAssets,
+        currentLiabilities,
+      },
+      receivablesPayables: {
+        receivables,
+        payables,
+      },
+      inventorySummary: {
+        closingStockQty: stockSummary.totals.closingQty,
+        closingStockValue: stockSummary.totals.closingValue,
+        outwardQty: stockSummary.totals.outwardQty,
+        outwardValue: stockSummary.totals.outwardValue,
+        inwardQty: stockSummary.totals.inwardQty,
+        inwardValue: stockSummary.totals.inwardValue,
+      },
+      accountingRatios: {
+        inventoryTurnover,
+        debtEquityRatio,
+        receivableTurnoverDays,
+        returnOnInvestment,
+      },
+      cashBankAccounts: {
+        cashInHand: cashInHandTotal,
+        bankAccounts: bankBalanceTotal,
+      },
+      tradingDetails: {
+        grossProfit,
+        netLoss: netProfit < 0 ? Math.abs(netProfit) : 0,
+        salesAccounts: salesTotal,
+        purchaseAccounts: purchaseTotal,
+      },
       recentVouchers: vouchers
         .slice()
         .sort((left, right) => new Date(right.date) - new Date(left.date))
