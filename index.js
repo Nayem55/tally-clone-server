@@ -863,6 +863,272 @@ async function buildInventoryDetailReport(companyId, fromDate = null, toDate = n
   return { rows, totals };
 }
 
+function buildMovementMetrics(source = {}) {
+  const openingQty = normalizeMoney(source.openingQty || 0);
+  const openingValue = normalizeMoney(source.openingValue || 0);
+  const inwardQty = normalizeMoney(source.inwardQty || 0);
+  const inwardValue = normalizeMoney(source.inwardValue || 0);
+  const outwardQty = normalizeMoney(source.outwardQty || 0);
+  const outwardValue = normalizeMoney(source.outwardValue || 0);
+  const closingQty = normalizeMoney(source.closingQty || 0);
+  const closingValue = normalizeMoney(source.closingValue || 0);
+
+  return {
+    openingQty,
+    openingRate:
+      openingQty !== 0 ? normalizeMoney(Math.abs(openingValue) / Math.abs(openingQty)) : 0,
+    openingValue,
+    inwardQty,
+    inwardRate:
+      inwardQty !== 0 ? normalizeMoney(Math.abs(inwardValue) / Math.abs(inwardQty)) : 0,
+    inwardValue,
+    outwardQty,
+    outwardRate:
+      outwardQty !== 0 ? normalizeMoney(Math.abs(outwardValue) / Math.abs(outwardQty)) : 0,
+    outwardValue,
+    closingQty,
+    closingRate:
+      closingQty !== 0 ? normalizeMoney(Math.abs(closingValue) / Math.abs(closingQty)) : 0,
+    closingValue,
+  };
+}
+
+function emptyMovementAccumulator() {
+  return {
+    openingQty: 0,
+    openingValue: 0,
+    inwardQty: 0,
+    inwardValue: 0,
+    outwardQty: 0,
+    outwardValue: 0,
+    closingQty: 0,
+    closingValue: 0,
+  };
+}
+
+function addMovementTotals(target, source = {}) {
+  target.openingQty = normalizeMoney(target.openingQty + Number(source.openingQty || 0));
+  target.openingValue = normalizeMoney(target.openingValue + Number(source.openingValue || 0));
+  target.inwardQty = normalizeMoney(target.inwardQty + Number(source.inwardQty || 0));
+  target.inwardValue = normalizeMoney(target.inwardValue + Number(source.inwardValue || 0));
+  target.outwardQty = normalizeMoney(target.outwardQty + Number(source.outwardQty || 0));
+  target.outwardValue = normalizeMoney(target.outwardValue + Number(source.outwardValue || 0));
+  target.closingQty = normalizeMoney(target.closingQty + Number(source.closingQty || 0));
+  target.closingValue = normalizeMoney(target.closingValue + Number(source.closingValue || 0));
+}
+
+function basePartyName(value = "") {
+  const normalized = normalizeName(value);
+  if (!normalized) return "Unassigned Party";
+  return normalized.split(":")[0].trim() || normalized;
+}
+
+function resolveInventoryPartyMeta(voucher, ledgerMap) {
+  if (voucher?.customerSnapshot?.name) {
+    const baseName = normalizeName(voucher.customerSnapshot.name);
+    const ledgerName = `${baseName} (Customer)`;
+    return {
+      ledgerName,
+      groupName: ledgerName,
+    };
+  }
+
+  const direction = inferStockDirection(voucher?.voucherName);
+  const lines = Array.isArray(voucher?.lines) ? voucher.lines : [];
+
+  const preferredLines =
+    direction > 0
+      ? lines.filter((line) => Number(line.credit || 0) > 0)
+      : direction < 0
+        ? lines.filter((line) => Number(line.debit || 0) > 0)
+        : lines;
+
+  const ledgerName =
+    preferredLines
+      .map((line) => normalizeName(ledgerMap.get(String(line.ledgerId)) || ""))
+      .find((name) => name && !["sales", "purchase"].includes(nameKey(name))) ||
+    normalizeName(ledgerMap.get(String(lines[0]?.ledgerId || "")) || "") ||
+    "Internal Inventory";
+
+  return {
+    ledgerName,
+    groupName: basePartyName(ledgerName),
+  };
+}
+
+async function buildInventoryMovementDimensionReport(
+  companyId,
+  fromDate = null,
+  toDate = null,
+  dimension = "stock-item",
+) {
+  const detailReport = await buildInventoryDetailReport(companyId, fromDate, toDate);
+
+  if (["stock-item", "stock-group", "stock-category"].includes(dimension)) {
+    const [items, categories] = await Promise.all([
+      Items.find({ companyId }).toArray(),
+      StockCategories.find({ companyId }).toArray(),
+    ]);
+
+    const itemById = new Map(items.map((item) => [String(item._id), item]));
+    const categoryById = new Map(categories.map((row) => [String(row._id), row.name]));
+    const accumulator = new Map();
+
+    detailReport.rows.forEach((row) => {
+      const item = itemById.get(String(row.itemId)) || {};
+      const categoryName =
+        categoryById.get(String(item.stockCategoryId || "")) ||
+        item.stockCategory ||
+        "Uncategorized";
+
+      let key = String(row.itemId);
+      let label = row.itemName;
+      let secondaryLabel = row.alias || "";
+
+      if (dimension === "stock-group") {
+        key = String(row.groupId || row.groupName || "ungrouped");
+        label = row.groupName || "Ungrouped";
+        secondaryLabel = `${detailReport.rows.filter((entry) => String(entry.groupId || "") === String(row.groupId || "")).length} items`;
+      } else if (dimension === "stock-category") {
+        key = normalizeName(categoryName).toLowerCase() || "uncategorized";
+        label = categoryName;
+        secondaryLabel = row.groupName || "";
+      }
+
+      if (!accumulator.has(key)) {
+        accumulator.set(key, {
+          id: key,
+          name: label,
+          secondaryLabel,
+          metrics: emptyMovementAccumulator(),
+        });
+      }
+
+      addMovementTotals(accumulator.get(key).metrics, row);
+    });
+
+    const rows = [...accumulator.values()]
+      .map((row) => ({
+        ...row,
+        metrics: buildMovementMetrics(row.metrics),
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    const totals = rows.reduce((sum, row) => {
+      addMovementTotals(sum, row.metrics);
+      return sum;
+    }, emptyMovementAccumulator());
+
+    return {
+      rows,
+      totals: buildMovementMetrics(totals),
+    };
+  }
+
+  const [vouchers, ledgers] = await Promise.all([
+    Vouchers.find({
+      companyId,
+      ...(toDate ? { date: { $lte: toDate } } : {}),
+      inventoryLines: { $exists: true, $ne: [] },
+    }).toArray(),
+    Ledgers.find({ companyId }).toArray(),
+  ]);
+
+  const ledgerMap = new Map(ledgers.map((ledger) => [String(ledger._id), ledger.name]));
+  const stateMap = new Map();
+
+  vouchers
+    .slice()
+    .sort((left, right) => {
+      const leftTime = left?.date ? new Date(left.date).getTime() : 0;
+      const rightTime = right?.date ? new Date(right.date).getTime() : 0;
+      return leftTime - rightTime;
+    })
+    .forEach((voucher) => {
+      const direction = inferStockDirection(voucher.voucherName);
+      if (!Array.isArray(voucher.inventoryLines) || direction === 0) return;
+
+      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+      const beforePeriod = fromDate && voucherDate ? voucherDate < fromDate : false;
+      const inPeriod =
+        !fromDate ||
+        ((voucherDate && voucherDate >= fromDate) && (!toDate || voucherDate <= toDate));
+
+      const partyMeta = resolveInventoryPartyMeta(voucher, ledgerMap);
+      const key =
+        dimension === "group"
+          ? normalizeName(partyMeta.groupName).toLowerCase()
+          : normalizeName(partyMeta.ledgerName).toLowerCase();
+      const label = dimension === "group" ? partyMeta.groupName : partyMeta.ledgerName;
+      const secondaryLabel =
+        dimension === "group" ? "" : partyMeta.groupName;
+
+      const state = stateMap.get(key) || {
+        id: key,
+        name: label || "Unassigned",
+        secondaryLabel,
+        metrics: emptyMovementAccumulator(),
+      };
+
+      voucher.inventoryLines.forEach((line) => {
+        const qty = normalizeMoney(Number(line.qty) || 0);
+        const rate = normalizeMoney(Number(line.rate) || 0);
+        const value = normalizeMoney(Number(line.amount) || qty * rate);
+
+        if (beforePeriod) {
+          state.metrics.openingQty = normalizeMoney(
+            state.metrics.openingQty + (direction > 0 ? qty : -qty),
+          );
+          state.metrics.openingValue = normalizeMoney(
+            state.metrics.openingValue + (direction > 0 ? value : -value),
+          );
+        }
+
+        if (inPeriod) {
+          if (direction > 0) {
+            state.metrics.inwardQty = normalizeMoney(state.metrics.inwardQty + qty);
+            state.metrics.inwardValue = normalizeMoney(state.metrics.inwardValue + value);
+          } else {
+            state.metrics.outwardQty = normalizeMoney(state.metrics.outwardQty + qty);
+            state.metrics.outwardValue = normalizeMoney(state.metrics.outwardValue + value);
+          }
+        }
+
+        state.metrics.closingQty = normalizeMoney(
+          state.metrics.closingQty + (direction > 0 ? qty : -qty),
+        );
+        state.metrics.closingValue = normalizeMoney(
+          state.metrics.closingValue + (direction > 0 ? value : -value),
+        );
+      });
+
+      stateMap.set(key, state);
+    });
+
+  const rows = [...stateMap.values()]
+    .map((row) => ({
+      ...row,
+      metrics: buildMovementMetrics({
+        ...row.metrics,
+        closingQty: normalizeMoney(row.metrics.openingQty + row.metrics.inwardQty - row.metrics.outwardQty),
+        closingValue: normalizeMoney(
+          row.metrics.openingValue + row.metrics.inwardValue - row.metrics.outwardValue,
+        ),
+      }),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  const totals = rows.reduce((sum, row) => {
+    addMovementTotals(sum, row.metrics);
+    return sum;
+  }, emptyMovementAccumulator());
+
+  return {
+    rows,
+    totals: buildMovementMetrics(totals),
+  };
+}
+
 async function buildStockGroupSummary(companyId, fromDate = null, toDate = null) {
   const summary = await buildStockSummary(companyId, fromDate, toDate);
   const groups = await Groups.find({ companyId }).toArray();
@@ -3828,42 +4094,17 @@ app.get("/companies/:companyId/reports/inventory-movement-analysis", async (req,
     await ensureCompanyCoreMasters(companyId);
     const fromDate = safeDate(req.query.from);
     const toDate = safeDate(req.query.to);
-    const report = await buildInventoryDetailReport(companyId, fromDate, toDate);
+    const dimension = normalizeName(req.query.dimension || "stock-group")
+      .toLowerCase()
+      .replace(/\s+/g, "-");
+    const report = await buildInventoryMovementDimensionReport(
+      companyId,
+      fromDate,
+      toDate,
+      dimension,
+    );
 
-    const rows = report.rows.map((row) => ({
-      itemId: row.itemId,
-      itemName: row.itemName,
-      alias: row.alias || "",
-      groupName: row.groupName || "",
-      unitOfMeasure: row.unitOfMeasure || "",
-      openingQty: row.openingQty,
-      inwardQty: row.inwardQty,
-      outwardQty: row.outwardQty,
-      netQty: normalizeMoney(row.inwardQty - row.outwardQty),
-      closingQty: row.closingQty,
-      closingRate: row.closingRate,
-      closingValue: row.closingValue,
-      stockTurnover: row.stockTurnover,
-      totalMovementQty: row.totalMovementQty,
-      lastInwardAt: row.lastInwardAt,
-      lastOutwardAt: row.lastOutwardAt,
-    }));
-
-    res.json({
-      rows,
-      totals: report.totals,
-      analytics: {
-        mostMovedItems: rows
-          .slice()
-          .sort((left, right) => right.totalMovementQty - left.totalMovementQty)
-          .slice(0, 5),
-        fastestOutwardItems: rows
-          .filter((row) => row.outwardQty > 0)
-          .slice()
-          .sort((left, right) => right.outwardQty - left.outwardQty)
-          .slice(0, 5),
-      },
-    });
+    res.json(report);
   } catch (err) {
     console.error("Error building inventory movement analysis:", err);
     res.status(500).json({ message: "Error building inventory movement analysis" });
