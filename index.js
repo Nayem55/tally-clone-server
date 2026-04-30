@@ -817,6 +817,8 @@ async function buildInventoryDetailReport(companyId, fromDate = null, toDate = n
         alias: item.alias || "",
         groupId: item.groupId,
         groupName: groupsById.get(String(item.groupId))?.name || "",
+        stockCategoryId: item.stockCategoryId || "",
+        stockCategoryName: item.stockCategory || "",
         unitOfMeasure: item.unitOfMeasure || "",
         openingQty,
         openingRate,
@@ -2958,12 +2960,20 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const voucherId = new ObjectId(req.params.voucherId);
+    const existingVoucher = await Vouchers.findOne({ _id: voucherId, companyId });
+    if (!existingVoucher) {
+      return res.status(404).json({ message: "Voucher not found" });
+    }
     const {
       voucherTypeId,
       voucherName,
       number,
       date,
       narration,
+      referenceNo,
+      customerId,
+      customerSnapshot,
+      posMeta,
       lines,
       inventoryLines,
     } = req.body;
@@ -2982,6 +2992,30 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
     if (number !== undefined) update.$set.number = number;
     if (date) update.$set.date = new Date(date);
     if (narration !== undefined) update.$set.narration = narration;
+    if (referenceNo !== undefined) update.$set.referenceNo = referenceNo;
+    if (customerId && ObjectId.isValid(customerId)) update.$set.customerId = new ObjectId(customerId);
+    if (customerSnapshot) {
+      update.$set.customerSnapshot = {
+        name: normalizeName(customerSnapshot.name || ""),
+        phone: normalizePhone(customerSnapshot.phone || ""),
+        address: normalizeName(customerSnapshot.address || ""),
+      };
+    }
+    if (posMeta) {
+      update.$set.posMeta = {
+        discountType: posMeta.discountType || "fixed",
+        discountValue: normalizeMoney(posMeta.discountValue || 0),
+        invoiceDiscount: normalizeMoney(posMeta.invoiceDiscount || 0),
+        subtotal: normalizeMoney(posMeta.subtotal || 0),
+        totalAmount: normalizeMoney(posMeta.totalAmount || 0),
+        rewardEarned: normalizeMoney(posMeta.rewardEarned || 0),
+        rewardRedeemed: normalizeMoney(posMeta.rewardRedeemed || 0),
+        cashAmount: normalizeMoney(posMeta.cashAmount || 0),
+        cardAmount: normalizeMoney(posMeta.cardAmount || 0),
+        cashTendered: normalizeMoney(posMeta.cashTendered || 0),
+        changeAmount: normalizeMoney(posMeta.changeAmount || 0),
+      };
+    }
 
     if (Array.isArray(lines)) {
       const validLines = lines.filter((line) => line?.ledgerId);
@@ -3025,6 +3059,21 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
             (Number(line.qty) || 0) * (Number(line.rate) || 0),
           billedQty: Number(line.billedQty) || Number(line.qty) || 0,
           discount: Number(line.discount) || 0,
+          mrpRate: Number(line.mrpRate) || Number(line.rate) || 0,
+          discountType: line.discountType || "fixed",
+          discountValue: Number(line.discountValue) || 0,
+          groupId:
+            line.groupId && ObjectId.isValid(line.groupId)
+              ? new ObjectId(line.groupId)
+              : null,
+          groupName: normalizeName(line.groupName),
+          stockCategoryId:
+            line.stockCategoryId && ObjectId.isValid(line.stockCategoryId)
+              ? new ObjectId(line.stockCategoryId)
+              : null,
+          stockCategoryName: normalizeName(line.stockCategoryName),
+          alias: normalizeName(line.alias),
+          barcode: normalizeName(line.barcode),
           godownId:
             line.godownId && ObjectId.isValid(line.godownId)
               ? new ObjectId(line.godownId)
@@ -3040,6 +3089,16 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
 
     await Vouchers.updateOne({ _id: voucherId, companyId }, update);
     const updated = await Vouchers.findOne({ _id: voucherId, companyId });
+    if (
+      nameKey(existingVoucher.voucherName || "") === "pos voucher" ||
+      nameKey(updated?.voucherName || "") === "pos voucher"
+    ) {
+      await rebuildPosCustomerFromVouchers(companyId, existingVoucher.customerSnapshot?.phone);
+      const nextPhone = updated?.customerSnapshot?.phone;
+      if (normalizePhone(nextPhone) !== normalizePhone(existingVoucher.customerSnapshot?.phone)) {
+        await rebuildPosCustomerFromVouchers(companyId, nextPhone);
+      }
+    }
     res.json(updated);
   } catch (err) {
     console.error("Error updating voucher:", err);
@@ -5127,6 +5186,68 @@ async function upsertPosCustomer(companyId, customerInput, purchaseSummary) {
   );
 
   return await Customers.findOne({ _id: existing._id, companyId });
+}
+
+async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
+  const phone = normalizePhone(phoneInput);
+  if (!phone) return null;
+
+  const vouchers = await Vouchers.find({
+    companyId,
+    voucherName: { $regex: "^POS Voucher$", $options: "i" },
+    "customerSnapshot.phone": phone,
+  })
+    .sort({ date: 1, createdAt: 1 })
+    .toArray();
+
+  if (vouchers.length === 0) {
+    await Customers.deleteOne({ companyId, phone });
+    return null;
+  }
+
+  const firstVoucher = vouchers[0];
+  const latestVoucher = vouchers[vouchers.length - 1];
+  const totalSpent = normalizeMoney(
+    vouchers.reduce((sum, voucher) => sum + Number(voucher.posMeta?.totalAmount || 0), 0),
+  );
+  const lifetimeRewardEarned = normalizeMoney(
+    vouchers.reduce((sum, voucher) => sum + Number(voucher.posMeta?.rewardEarned || 0), 0),
+  );
+  const lifetimeRewardRedeemed = normalizeMoney(
+    vouchers.reduce((sum, voucher) => sum + Number(voucher.posMeta?.rewardRedeemed || 0), 0),
+  );
+  const rewardPoints = normalizeMoney(lifetimeRewardEarned - lifetimeRewardRedeemed);
+
+  const doc = {
+    companyId,
+    name: normalizeName(latestVoucher.customerSnapshot?.name || "Walk-in Customer"),
+    phone,
+    address: normalizeName(latestVoucher.customerSnapshot?.address || ""),
+    rewardPoints,
+    lifetimeRewardEarned,
+    lifetimeRewardRedeemed,
+    totalSpent,
+    totalOrders: vouchers.length,
+    firstPurchaseAt: new Date(firstVoucher.date),
+    lastPurchaseAt: new Date(latestVoucher.date),
+    updatedAt: new Date(),
+  };
+
+  const existing = await Customers.findOne({ companyId, phone });
+  if (existing) {
+    await Customers.updateOne(
+      { _id: existing._id, companyId },
+      { $set: doc, $setOnInsert: { createdAt: existing.createdAt || new Date() } },
+    );
+    return Customers.findOne({ _id: existing._id, companyId });
+  }
+
+  const insertDoc = {
+    ...doc,
+    createdAt: new Date(),
+  };
+  const result = await Customers.insertOne(insertDoc);
+  return { _id: result.insertedId, ...insertDoc };
 }
 
 app.get("/companies/:companyId/units", async (req, res) => {
