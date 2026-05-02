@@ -47,6 +47,13 @@ function normalizeName(value = "") {
   return String(value).trim().replace(/\s+/g, " ");
 }
 
+function slugifySegment(value = "") {
+  return normalizeName(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 function nameKey(value = "") {
   return normalizeName(value).toLowerCase();
 }
@@ -3375,29 +3382,67 @@ app.delete("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
 
 // Get next voucher number for a voucher type
 app.get("/companies/:companyId/vouchers/next-number", async (req, res) => {
-  const companyId = new ObjectId(req.params.companyId);
-  console.log(companyId);
-  const { voucherTypeId } = req.query;
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const { voucherTypeId } = req.query;
 
-  if (!voucherTypeId) {
-    return res.status(400).json({ message: "voucherTypeId required" });
+    if (!voucherTypeId || !ObjectId.isValid(voucherTypeId)) {
+      return res.status(400).json({ message: "voucherTypeId required" });
+    }
+
+    const voucherTypeObjectId = new ObjectId(voucherTypeId);
+    const [company, voucherType, vouchers] = await Promise.all([
+      Companies.findOne({ _id: companyId }),
+      VoucherTypes.findOne({ _id: voucherTypeObjectId, companyId }),
+      Vouchers.find({
+        companyId,
+        voucherTypeId: voucherTypeObjectId,
+      }).project({ number: 1 }).toArray(),
+    ]);
+
+    if (!company) {
+      return res.status(404).json({ message: "Company not found" });
+    }
+    if (!voucherType) {
+      return res.status(404).json({ message: "Voucher type not found" });
+    }
+
+    const companySlug = slugifySegment(company.name || "company") || "company";
+    const voucherSlug = slugifySegment(voucherType.name || "voucher") || "voucher";
+    const prefix = `${companySlug}-${voucherSlug}-`;
+
+    let maxSequence = 0;
+    for (const voucher of vouchers) {
+      const numberText = normalizeTextBlock(voucher.number);
+      const match = numberText.match(new RegExp(`^${escapeRegex(prefix)}(\\d+)$`, "i"));
+      if (match) {
+        maxSequence = Math.max(maxSequence, Number(match[1] || 0));
+        continue;
+      }
+
+      if (/^\d+$/.test(numberText)) {
+        maxSequence = Math.max(maxSequence, Number(numberText));
+      }
+    }
+
+    if (maxSequence === 0 && vouchers.length > 0) {
+      maxSequence = vouchers.length;
+    }
+
+    const nextNumber = maxSequence + 1;
+    const formattedNumber = `${prefix}${String(nextNumber).padStart(2, "0")}`;
+
+    res.json({
+      nextNumber,
+      formattedNumber,
+      prefix,
+      companySlug,
+      voucherSlug,
+    });
+  } catch (err) {
+    console.error("Error generating next voucher number:", err);
+    res.status(500).json({ message: "Unable to generate next voucher number" });
   }
-
-  const last = await Vouchers.find({
-    companyId,
-    voucherTypeId: new ObjectId(voucherTypeId),
-  })
-    .sort({ number: -1 })
-    .limit(1)
-    .toArray();
-
-  let nextNumber = 1;
-
-  if (last.length > 0 && !isNaN(last[0].number)) {
-    nextNumber = Number(last[0].number) + 1;
-  }
-
-  res.json({ nextNumber });
 });
 
 // ---------- SAMPLE REPORT: Trial Balance (base for BS & P&L) ----------
