@@ -127,7 +127,7 @@ function summarizeSalaryHeads(heads = []) {
 }
 
 function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
-  const general = payload.general || {};
+  const general = payload.general || payload || {};
   const personalDetails = payload.personalDetails || {};
   const contactDetails = payload.contactDetails || {};
   const otherDetails = payload.otherDetails || {};
@@ -5829,17 +5829,22 @@ app.post("/companies/:companyId/employees", async (req, res) => {
       employeeNumber: generatedNumber,
     });
 
-    if (!doc.name) {
-      return res.status(400).json({ message: "Employee name is required" });
+    const duplicateConditions = [];
+    if (doc.employeeNumber) {
+      duplicateConditions.push({ employeeNumber: doc.employeeNumber });
+    }
+    if (doc.name) {
+      duplicateConditions.push({
+        name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" },
+      });
     }
 
-    const duplicate = await Employees.findOne({
-      companyId,
-      $or: [
-        { employeeNumber: doc.employeeNumber },
-        { name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" } },
-      ],
-    });
+    const duplicate = duplicateConditions.length
+      ? await Employees.findOne({
+          companyId,
+          $or: duplicateConditions,
+        })
+      : null;
 
     if (duplicate) {
       return res.status(400).json({
@@ -5871,18 +5876,23 @@ app.put("/companies/:companyId/employees/:id", async (req, res) => {
       employeeNumber: existing.employeeNumber,
     });
 
-    if (!doc.name) {
-      return res.status(400).json({ message: "Employee name is required" });
+    const duplicateConditions = [];
+    if (doc.employeeNumber) {
+      duplicateConditions.push({ employeeNumber: doc.employeeNumber });
+    }
+    if (doc.name) {
+      duplicateConditions.push({
+        name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" },
+      });
     }
 
-    const duplicate = await Employees.findOne({
-      companyId,
-      _id: { $ne: id },
-      $or: [
-        { employeeNumber: doc.employeeNumber },
-        { name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" } },
-      ],
-    });
+    const duplicate = duplicateConditions.length
+      ? await Employees.findOne({
+          companyId,
+          _id: { $ne: id },
+          $or: duplicateConditions,
+        })
+      : null;
 
     if (duplicate) {
       return res.status(400).json({
