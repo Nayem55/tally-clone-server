@@ -25,6 +25,7 @@ let Companies,
   VoucherTypes,
   Vouchers,
   Customers,
+  Employees,
   Items,
   pricelevels,
   Currencies,
@@ -93,6 +94,257 @@ function voucherTotalAmount(voucher) {
 
 function escapeRegex(value = "") {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeTextBlock(value = "") {
+  return String(value || "").trim();
+}
+
+function toBoolean(value) {
+  return Boolean(value);
+}
+
+function summarizeSalaryHeads(heads = []) {
+  const totalEarnings = normalizeMoney(
+    heads
+      .filter((head) => nameKey(head.section) !== "deduction")
+      .reduce((sum, head) => sum + (Number(head.rate) || 0), 0),
+  );
+  const totalDeductions = normalizeMoney(
+    heads
+      .filter((head) => nameKey(head.section) === "deduction")
+      .reduce((sum, head) => sum + (Number(head.rate) || 0), 0),
+  );
+  const grossSalary = normalizeMoney(totalEarnings + totalDeductions);
+  const netPayable = normalizeMoney(totalEarnings - totalDeductions);
+
+  return {
+    grossSalary,
+    totalEarnings,
+    totalDeductions,
+    netPayable,
+  };
+}
+
+function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
+  const general = payload.general || {};
+  const personalDetails = payload.personalDetails || {};
+  const contactDetails = payload.contactDetails || {};
+  const otherDetails = payload.otherDetails || {};
+  const salaryDetails = payload.salaryDetails || {};
+  const bankDetails = payload.bankDetails || {};
+  const statutoryDetails = payload.statutoryDetails || {};
+  const additionalInformation = payload.additionalInformation || {};
+
+  const payHeads = (salaryDetails.payHeads || []).map((head, index) => ({
+    id: normalizeTextBlock(head.id) || `head-${index + 1}`,
+    section:
+      nameKey(head.section) === "deduction" ? "Deduction" : "Earning",
+    name: normalizeName(head.name),
+    rate: Number(head.rate || 0),
+    per: normalizeName(head.per) || "Month",
+    payHeadType: normalizeName(head.payHeadType) || "Start Afresh",
+    calculationType: normalizeName(head.calculationType) || "As Per Rate",
+    computedOn: normalizeTextBlock(head.computedOn),
+  }));
+
+  return {
+    name: normalizeName(general.name),
+    alias: normalizeTextBlock(general.alias),
+    under: normalizeName(general.under),
+    underCategory: normalizeTextBlock(general.underCategory),
+    employeeNumber: normalizeTextBlock(general.employeeNumber) || employeeNumber,
+    dateOfJoining: normalizeTextBlock(general.dateOfJoining),
+    defineSalaryDetails: toBoolean(general.defineSalaryDetails),
+    photoName: normalizeTextBlock(general.photoName),
+    personalDetails: {
+      designation: normalizeTextBlock(personalDetails.designation),
+      functionName: normalizeTextBlock(personalDetails.functionName),
+      location: normalizeTextBlock(personalDetails.location),
+      gender: normalizeTextBlock(personalDetails.gender),
+      dateOfBirth: normalizeTextBlock(personalDetails.dateOfBirth),
+      bloodGroup: normalizeTextBlock(personalDetails.bloodGroup),
+      fatherOrMotherName: normalizeTextBlock(personalDetails.fatherOrMotherName),
+      spouseName: normalizeTextBlock(personalDetails.spouseName),
+      address: normalizeTextBlock(personalDetails.address),
+    },
+    contactDetails: {
+      phoneCountryCode:
+        normalizeTextBlock(contactDetails.phoneCountryCode) || "+880",
+      phoneNumber: normalizeTextBlock(contactDetails.phoneNumber),
+      email: normalizeTextBlock(contactDetails.email),
+    },
+    otherDetails: {
+      department: normalizeTextBlock(otherDetails.department),
+      employeeType: normalizeTextBlock(otherDetails.employeeType),
+      status: normalizeTextBlock(otherDetails.status),
+      grade: normalizeTextBlock(otherDetails.grade),
+      reportingTo: normalizeTextBlock(otherDetails.reportingTo),
+      classification: normalizeTextBlock(otherDetails.classification),
+    },
+    salaryDetails: {
+      paymentFrequency: normalizeTextBlock(salaryDetails.paymentFrequency),
+      paymentMode: normalizeTextBlock(salaryDetails.paymentMode),
+      effectiveFrom: normalizeTextBlock(salaryDetails.effectiveFrom),
+      comments: normalizeTextBlock(salaryDetails.comments),
+      payHeads,
+    },
+    bankDetails: {
+      provideBankDetails: toBoolean(bankDetails.provideBankDetails),
+      bankAccountNo: normalizeTextBlock(bankDetails.bankAccountNo),
+      accountHolderName: normalizeTextBlock(bankDetails.accountHolderName),
+      bankName: normalizeTextBlock(bankDetails.bankName),
+      mobileBankingNo: normalizeTextBlock(bankDetails.mobileBankingNo),
+      branchName: normalizeTextBlock(bankDetails.branchName),
+      swiftCode: normalizeTextBlock(bankDetails.swiftCode),
+      routingNo: normalizeTextBlock(bankDetails.routingNo),
+      ibanNo: normalizeTextBlock(bankDetails.ibanNo),
+      accountType: normalizeTextBlock(bankDetails.accountType),
+      currency: normalizeTextBlock(bankDetails.currency),
+    },
+    statutoryDetails: {
+      identity: {
+        nid: normalizeTextBlock(statutoryDetails.identity?.nid),
+        tin: normalizeTextBlock(statutoryDetails.identity?.tin),
+        passport: normalizeTextBlock(statutoryDetails.identity?.passport),
+      },
+      tax: {
+        applicable: toBoolean(statutoryDetails.tax?.applicable),
+        category: normalizeTextBlock(statutoryDetails.tax?.category),
+        rate: Number(statutoryDetails.tax?.rate || 0),
+      },
+      pf: {
+        applicable: toBoolean(statutoryDetails.pf?.applicable),
+        number: normalizeTextBlock(statutoryDetails.pf?.number),
+        contribution: Number(statutoryDetails.pf?.contribution || 0),
+      },
+      esi: {
+        applicable: toBoolean(statutoryDetails.esi?.applicable),
+        number: normalizeTextBlock(statutoryDetails.esi?.number),
+      },
+      professionalTax: Number(statutoryDetails.professionalTax || 0),
+      gratuityEligible: toBoolean(statutoryDetails.gratuityEligible),
+      lwfApplicable: toBoolean(statutoryDetails.lwfApplicable),
+      lwfNumber: normalizeTextBlock(statutoryDetails.lwfNumber),
+      compliance: {
+        incomeTaxRegime: normalizeTextBlock(
+          statutoryDetails.compliance?.incomeTaxRegime,
+        ),
+        panNumber: normalizeTextBlock(statutoryDetails.compliance?.panNumber),
+        uanNumber: normalizeTextBlock(statutoryDetails.compliance?.uanNumber),
+        dateOfBirth: normalizeTextBlock(statutoryDetails.compliance?.dateOfBirth),
+      },
+      documents: {
+        idProof: normalizeTextBlock(statutoryDetails.documents?.idProof),
+        taxDocument: normalizeTextBlock(statutoryDetails.documents?.taxDocument),
+        pfDocument: normalizeTextBlock(statutoryDetails.documents?.pfDocument),
+        otherDocument: normalizeTextBlock(statutoryDetails.documents?.otherDocument),
+      },
+      notes: normalizeTextBlock(statutoryDetails.notes),
+    },
+    additionalInformation: {
+      employmentDetails: {
+        employeeType: normalizeTextBlock(
+          additionalInformation.employmentDetails?.employeeType,
+        ),
+        employmentStatus: normalizeTextBlock(
+          additionalInformation.employmentDetails?.employmentStatus,
+        ),
+        probationPeriodDays: Number(
+          additionalInformation.employmentDetails?.probationPeriodDays || 0,
+        ),
+        confirmationDate: normalizeTextBlock(
+          additionalInformation.employmentDetails?.confirmationDate,
+        ),
+      },
+      workDetails: {
+        workLocation: normalizeTextBlock(
+          additionalInformation.workDetails?.workLocation,
+        ),
+        department: normalizeTextBlock(additionalInformation.workDetails?.department),
+        reportingTo: normalizeTextBlock(additionalInformation.workDetails?.reportingTo),
+        jobTitle: normalizeTextBlock(additionalInformation.workDetails?.jobTitle),
+      },
+      leaveAttendance: {
+        leavePolicy: normalizeTextBlock(
+          additionalInformation.leaveAttendance?.leavePolicy,
+        ),
+        weeklyOff: normalizeTextBlock(additionalInformation.leaveAttendance?.weeklyOff),
+        attendanceType: normalizeTextBlock(
+          additionalInformation.leaveAttendance?.attendanceType,
+        ),
+        defaultLeaveBalanceDays: Number(
+          additionalInformation.leaveAttendance?.defaultLeaveBalanceDays || 0,
+        ),
+      },
+      skillsQualifications: {
+        highestEducation: normalizeTextBlock(
+          additionalInformation.skillsQualifications?.highestEducation,
+        ),
+        professionalQualification: normalizeTextBlock(
+          additionalInformation.skillsQualifications?.professionalQualification,
+        ),
+        skills: normalizeTextBlock(
+          additionalInformation.skillsQualifications?.skills,
+        ),
+      },
+      emergencyContact: {
+        name: normalizeTextBlock(additionalInformation.emergencyContact?.name),
+        relationship: normalizeTextBlock(
+          additionalInformation.emergencyContact?.relationship,
+        ),
+        phone: normalizeTextBlock(additionalInformation.emergencyContact?.phone),
+        address: normalizeTextBlock(additionalInformation.emergencyContact?.address),
+      },
+      previousEmployment: {
+        employer: normalizeTextBlock(
+          additionalInformation.previousEmployment?.employer,
+        ),
+        designation: normalizeTextBlock(
+          additionalInformation.previousEmployment?.designation,
+        ),
+        totalExperienceYears: Number(
+          additionalInformation.previousEmployment?.totalExperienceYears || 0,
+        ),
+        relevantExperienceYears: Number(
+          additionalInformation.previousEmployment?.relevantExperienceYears || 0,
+        ),
+      },
+      otherInformation: {
+        maritalStatus: normalizeTextBlock(
+          additionalInformation.otherInformation?.maritalStatus,
+        ),
+        nationality: normalizeTextBlock(
+          additionalInformation.otherInformation?.nationality,
+        ),
+        religion: normalizeTextBlock(additionalInformation.otherInformation?.religion),
+        languages: normalizeTextBlock(
+          additionalInformation.otherInformation?.languages,
+        ),
+        hobbies: normalizeTextBlock(additionalInformation.otherInformation?.hobbies),
+      },
+    },
+    summary: summarizeSalaryHeads(payHeads),
+    updatedAt: new Date(),
+  };
+}
+
+async function generateEmployeeNumber(companyId) {
+  const rows = await Employees.find(
+    { companyId },
+    { projection: { employeeNumber: 1 } },
+  ).toArray();
+
+  let next = rows.length + 1;
+  const used = new Set(
+    rows.map((row) => normalizeTextBlock(row.employeeNumber)).filter(Boolean),
+  );
+
+  while (used.has(`EMP${String(next).padStart(4, "0")}`)) {
+    next += 1;
+  }
+
+  return `EMP${String(next).padStart(4, "0")}`;
 }
 
 async function resolveMasterName(collection, companyId, idOrName) {
@@ -1333,6 +1585,7 @@ async function connectDb() {
   VoucherTypes = db.collection("voucherTypes");
   Vouchers = db.collection("vouchers");
   Customers = db.collection("customers");
+  Employees = db.collection("employees");
   Items = db.collection("items");
   pricelevels = db.collection("pricelevels");
   Currencies = db.collection("currencies");
@@ -5526,6 +5779,138 @@ app.delete("/companies/:companyId/currencies/:id", async (req, res) => {
     res.json({ message: "Currency deleted" });
   } catch (err) {
     res.status(500).json({ message: "Unable to delete currency" });
+  }
+});
+
+app.get("/companies/:companyId/employees", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const search = normalizeTextBlock(req.query.search);
+    const query = { companyId };
+
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), "i");
+      query.$or = [
+        { name: regex },
+        { employeeNumber: regex },
+        { alias: regex },
+        { "personalDetails.designation": regex },
+      ];
+    }
+
+    const rows = await Employees.find(query)
+      .sort({ createdAt: -1, name: 1 })
+      .toArray();
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ message: "Unable to load employees" });
+  }
+});
+
+app.get("/companies/:companyId/employees/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const row = await Employees.findOne({
+      _id: new ObjectId(req.params.id),
+      companyId,
+    });
+    if (!row) return res.status(404).json({ message: "Employee not found" });
+    res.json(row);
+  } catch (err) {
+    res.status(500).json({ message: "Unable to load employee" });
+  }
+});
+
+app.post("/companies/:companyId/employees", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const generatedNumber = await generateEmployeeNumber(companyId);
+    const doc = normalizeEmployeePayload(req.body, {
+      employeeNumber: generatedNumber,
+    });
+
+    if (!doc.name) {
+      return res.status(400).json({ message: "Employee name is required" });
+    }
+
+    const duplicate = await Employees.findOne({
+      companyId,
+      $or: [
+        { employeeNumber: doc.employeeNumber },
+        { name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" } },
+      ],
+    });
+
+    if (duplicate) {
+      return res.status(400).json({
+        message: "Employee with the same name or employee number already exists",
+      });
+    }
+
+    const finalDoc = {
+      companyId,
+      ...doc,
+      createdAt: new Date(),
+    };
+
+    const result = await Employees.insertOne(finalDoc);
+    res.status(201).json({ _id: result.insertedId, ...finalDoc });
+  } catch (err) {
+    res.status(500).json({ message: err.message || "Unable to create employee" });
+  }
+});
+
+app.put("/companies/:companyId/employees/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const id = new ObjectId(req.params.id);
+    const existing = await Employees.findOne({ _id: id, companyId });
+    if (!existing) return res.status(404).json({ message: "Employee not found" });
+
+    const doc = normalizeEmployeePayload(req.body, {
+      employeeNumber: existing.employeeNumber,
+    });
+
+    if (!doc.name) {
+      return res.status(400).json({ message: "Employee name is required" });
+    }
+
+    const duplicate = await Employees.findOne({
+      companyId,
+      _id: { $ne: id },
+      $or: [
+        { employeeNumber: doc.employeeNumber },
+        { name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" } },
+      ],
+    });
+
+    if (duplicate) {
+      return res.status(400).json({
+        message: "Employee with the same name or employee number already exists",
+      });
+    }
+
+    await Employees.updateOne(
+      { _id: id, companyId },
+      { $set: doc },
+    );
+
+    res.json(await Employees.findOne({ _id: id, companyId }));
+  } catch (err) {
+    res.status(500).json({ message: err.message || "Unable to update employee" });
+  }
+});
+
+app.delete("/companies/:companyId/employees/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await Employees.deleteOne({
+      _id: new ObjectId(req.params.id),
+      companyId,
+    });
+    res.json({ message: "Employee deleted" });
+  } catch (err) {
+    res.status(500).json({ message: "Unable to delete employee" });
   }
 });
 
