@@ -3098,8 +3098,11 @@ app.get("/companies/:companyId/vouchers", async (req, res) => {
   res.json(list);
 });
 
-app.get("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
+app.get("/companies/:companyId/vouchers/:voucherId", async (req, res, next) => {
   try {
+    if (req.params.voucherId === "next-number") {
+      return next();
+    }
     const companyId = new ObjectId(req.params.companyId);
     const voucherId = new ObjectId(req.params.voucherId);
     const voucher = await Vouchers.findOne({ _id: voucherId, companyId });
