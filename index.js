@@ -29,6 +29,8 @@ let Companies,
   Items,
   pricelevels,
   Currencies,
+  CostCategories,
+  CostCentres,
   StockCategories,
   Units,
   Godowns;
@@ -1605,6 +1607,8 @@ async function connectDb() {
   Items = db.collection("items");
   pricelevels = db.collection("pricelevels");
   Currencies = db.collection("currencies");
+  CostCategories = db.collection("costCategories");
+  CostCentres = db.collection("costCentres");
   StockCategories = db.collection("stockCategories");
   Units = db.collection("units");
   Godowns = db.collection("godowns");
@@ -5588,6 +5592,100 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
   const result = await Customers.insertOne(insertDoc);
   return { _id: result.insertedId, ...insertDoc };
 }
+
+app.get("/companies/:companyId/cost-categories", async (req, res) => {
+  const companyId = new ObjectId(req.params.companyId);
+  res.json(await listNamedMasters(CostCategories, companyId, { createdAt: 1 }));
+});
+
+app.post("/companies/:companyId/cost-categories", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const row = await createNamedMaster(CostCategories, companyId, req.body, {
+      duplicateMessage: "Cost category already exists",
+      mapPayload: (payload) => ({
+        alias: normalizeTextBlock(payload.alias),
+        description: normalizeTextBlock(payload.description),
+      }),
+    });
+    res.status(201).json(row);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
+app.put("/companies/:companyId/cost-categories/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await updateNamedMaster(CostCategories, companyId, req.params.id, req.body, {
+      duplicateMessage: "Cost category already exists",
+      mapPayload: (payload) => ({
+        alias: normalizeTextBlock(payload.alias),
+        description: normalizeTextBlock(payload.description),
+      }),
+    });
+    res.json(await CostCategories.findOne({ _id: new ObjectId(req.params.id), companyId }));
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
+app.delete("/companies/:companyId/cost-categories/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await deleteNamedMaster(CostCategories, companyId, req.params.id);
+    res.json({ message: "Cost category deleted" });
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
+app.get("/companies/:companyId/cost-centres", async (req, res) => {
+  const companyId = new ObjectId(req.params.companyId);
+  res.json(await listNamedMasters(CostCentres, companyId, { createdAt: 1 }));
+});
+
+app.post("/companies/:companyId/cost-centres", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const row = await createNamedMaster(CostCentres, companyId, req.body, {
+      duplicateMessage: "Cost centre already exists",
+      mapPayload: (payload) => ({
+        alias: normalizeTextBlock(payload.alias),
+        description: normalizeTextBlock(payload.description),
+      }),
+    });
+    res.status(201).json(row);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
+app.put("/companies/:companyId/cost-centres/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await updateNamedMaster(CostCentres, companyId, req.params.id, req.body, {
+      duplicateMessage: "Cost centre already exists",
+      mapPayload: (payload) => ({
+        alias: normalizeTextBlock(payload.alias),
+        description: normalizeTextBlock(payload.description),
+      }),
+    });
+    res.json(await CostCentres.findOne({ _id: new ObjectId(req.params.id), companyId }));
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
+app.delete("/companies/:companyId/cost-centres/:id", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await deleteNamedMaster(CostCentres, companyId, req.params.id);
+    res.json({ message: "Cost centre deleted" });
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
 
 app.get("/companies/:companyId/units", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
