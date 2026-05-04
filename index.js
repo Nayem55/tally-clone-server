@@ -86,17 +86,26 @@ function safeDate(value) {
 }
 
 function voucherTotalAmount(voucher) {
+  const commercialTotal = Number(voucher.commercialMeta?.totalAmount || 0);
+  if (commercialTotal > 0) return normalizeMoney(commercialTotal);
+
+  const posTotal = Number(voucher.posMeta?.totalAmount || 0);
+  if (posTotal > 0) return normalizeMoney(posTotal);
+
+  const accountingTotal = (voucher.lines || []).reduce(
+    (sum, line) =>
+      Math.max(sum, Number(line.debit || 0), Number(line.credit || 0)),
+    0,
+  );
+  if (accountingTotal > 0) return normalizeMoney(accountingTotal);
+
   const inventoryTotal = (voucher.inventoryLines || []).reduce(
     (sum, line) => normalizeMoney(sum + (Number(line.amount) || 0)),
     0,
   );
   if (inventoryTotal > 0) return inventoryTotal;
 
-  return (voucher.lines || []).reduce(
-    (sum, line) =>
-      Math.max(sum, Number(line.debit || 0), Number(line.credit || 0)),
-    0,
-  );
+  return 0;
 }
 
 function escapeRegex(value = "") {
@@ -3128,6 +3137,7 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       number,
       date,
       narration,
+      commercialMeta,
       lines,
       inventoryLines,
     } = req.body;
@@ -3210,6 +3220,20 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       createdAt: new Date(),
     };
 
+    if (commercialMeta) {
+      doc.commercialMeta = {
+        subtotal: normalizeMoney(commercialMeta.subtotal || 0),
+        lineDiscountTotal: normalizeMoney(
+          commercialMeta.lineDiscountTotal || 0,
+        ),
+        invoiceDiscount: normalizeMoney(commercialMeta.invoiceDiscount || 0),
+        additionalCharges: normalizeMoney(
+          commercialMeta.additionalCharges || 0,
+        ),
+        totalAmount: normalizeMoney(commercialMeta.totalAmount || 0),
+      };
+    }
+
     const result = await Vouchers.insertOne(doc);
     res.status(201).json({ _id: result.insertedId, ...doc });
   } catch (err) {
@@ -3236,6 +3260,7 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
       referenceNo,
       customerId,
       customerSnapshot,
+      commercialMeta,
       posMeta,
       lines,
       inventoryLines,
@@ -3262,6 +3287,19 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
         name: normalizeName(customerSnapshot.name || ""),
         phone: normalizePhone(customerSnapshot.phone || ""),
         address: normalizeName(customerSnapshot.address || ""),
+      };
+    }
+    if (commercialMeta) {
+      update.$set.commercialMeta = {
+        subtotal: normalizeMoney(commercialMeta.subtotal || 0),
+        lineDiscountTotal: normalizeMoney(
+          commercialMeta.lineDiscountTotal || 0,
+        ),
+        invoiceDiscount: normalizeMoney(commercialMeta.invoiceDiscount || 0),
+        additionalCharges: normalizeMoney(
+          commercialMeta.additionalCharges || 0,
+        ),
+        totalAmount: normalizeMoney(commercialMeta.totalAmount || 0),
       };
     }
     if (posMeta) {
