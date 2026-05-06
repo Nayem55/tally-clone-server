@@ -24,6 +24,7 @@ let Companies,
   Ledgers,
   VoucherTypes,
   Vouchers,
+  Boms,
   Customers,
   Employees,
   Items,
@@ -79,6 +80,117 @@ function splitBalance(amount) {
 function inferStockDirection(voucherName = "") {
   const key = nameKey(voucherName).replace(/[\s-]+/g, "_");
   return STOCK_VOUCHER_FLOW[key] || 0;
+}
+
+function inventoryRoleKey(value = "") {
+  const key = nameKey(value).replace(/[\s-]+/g, "_");
+  if (["raw_material", "rawmaterial", "raw"].includes(key))
+    return "raw_material";
+  if (["finished_good", "finishedgoods", "finished"].includes(key))
+    return "finished_good";
+  return "standard";
+}
+
+function itemMatchesRoleFilter(item = {}, options = {}) {
+  const role = inventoryRoleKey(item.inventoryRole);
+  const includeRoles = Array.isArray(options.includeRoles)
+    ? options.includeRoles.map(inventoryRoleKey)
+    : null;
+  const excludeRoles = Array.isArray(options.excludeRoles)
+    ? options.excludeRoles.map(inventoryRoleKey)
+    : [];
+
+  if (includeRoles && includeRoles.length > 0 && !includeRoles.includes(role)) {
+    return false;
+  }
+
+  if (excludeRoles.includes(role)) {
+    return false;
+  }
+
+  return true;
+}
+
+function getInventoryLineDirection(line = {}, voucherName = "") {
+  const explicit = nameKey(line.direction || "");
+  if (["in", "inward"].includes(explicit)) return 1;
+  if (["out", "outward"].includes(explicit)) return -1;
+  return inferStockDirection(voucherName);
+}
+
+function normalizeInventoryLinePayload(line = {}) {
+  const qty = Number(line.qty) || 0;
+  const rate = Number(line.rate) || 0;
+  return {
+    itemId: new ObjectId(line.itemId),
+    itemName: normalizeName(line.itemName || line.productSnapshot?.name || ""),
+    qty,
+    rate,
+    amount: Number(line.amount) || qty * rate,
+    billedQty: Number(line.billedQty) || qty,
+    discount: Number(line.discount) || 0,
+    mrpRate: Number(line.mrpRate) || rate,
+    discountType: line.discountType || "fixed",
+    discountValue: Number(line.discountValue) || 0,
+    direction:
+      getInventoryLineDirection(line) > 0
+        ? "IN"
+        : getInventoryLineDirection(line) < 0
+        ? "OUT"
+        : "",
+    groupId:
+      line.groupId && ObjectId.isValid(line.groupId)
+        ? new ObjectId(line.groupId)
+        : null,
+    groupName: normalizeName(line.groupName),
+    stockCategoryId:
+      line.stockCategoryId && ObjectId.isValid(line.stockCategoryId)
+        ? new ObjectId(line.stockCategoryId)
+        : null,
+    stockCategoryName: normalizeName(line.stockCategoryName),
+    alias: normalizeName(line.alias),
+    barcode: normalizeName(line.barcode),
+    godownId:
+      line.godownId && ObjectId.isValid(line.godownId)
+        ? new ObjectId(line.godownId)
+        : null,
+    godownName: normalizeName(line.godownName),
+    toGodownId:
+      line.toGodownId && ObjectId.isValid(line.toGodownId)
+        ? new ObjectId(line.toGodownId)
+        : null,
+    toGodownName: normalizeName(line.toGodownName),
+  };
+}
+
+function normalizeManufacturingMeta(meta = {}) {
+  if (!meta) return null;
+  return {
+    bomId:
+      meta.bomId && ObjectId.isValid(meta.bomId)
+        ? new ObjectId(meta.bomId)
+        : null,
+    bomName: normalizeName(meta.bomName || ""),
+    outputItemId:
+      meta.outputItemId && ObjectId.isValid(meta.outputItemId)
+        ? new ObjectId(meta.outputItemId)
+        : null,
+    outputItemName: normalizeName(meta.outputItemName || ""),
+    outputQty: normalizeMoney(meta.outputQty || 0),
+    componentCost: normalizeMoney(meta.componentCost || 0),
+    additionalCost: normalizeMoney(meta.additionalCost || 0),
+    totalCost: normalizeMoney(meta.totalCost || 0),
+    effectiveRate: normalizeMoney(meta.effectiveRate || 0),
+    notes: normalizeTextBlock(meta.notes || ""),
+  };
+}
+
+function formatProductionNumber(companyName = "", currentCount = 0) {
+  const companySlug = slugifySegment(companyName || "company") || "company";
+  return `${companySlug}-manufacturing-${String(currentCount + 1).padStart(
+    2,
+    "0",
+  )}`;
 }
 
 function safeDate(value) {
@@ -156,8 +268,7 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
 
   const payHeads = (salaryDetails.payHeads || []).map((head, index) => ({
     id: normalizeTextBlock(head.id) || `head-${index + 1}`,
-    section:
-      nameKey(head.section) === "deduction" ? "Deduction" : "Earning",
+    section: nameKey(head.section) === "deduction" ? "Deduction" : "Earning",
     name: normalizeName(head.name),
     rate: Number(head.rate || 0),
     per: normalizeName(head.per) || "Month",
@@ -171,7 +282,8 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
     alias: normalizeTextBlock(general.alias),
     under: normalizeName(general.under),
     underCategory: normalizeTextBlock(general.underCategory),
-    employeeNumber: normalizeTextBlock(general.employeeNumber) || employeeNumber,
+    employeeNumber:
+      normalizeTextBlock(general.employeeNumber) || employeeNumber,
     dateOfJoining: normalizeTextBlock(general.dateOfJoining),
     defineSalaryDetails: toBoolean(general.defineSalaryDetails),
     photoName: normalizeTextBlock(general.photoName),
@@ -182,7 +294,9 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
       gender: normalizeTextBlock(personalDetails.gender),
       dateOfBirth: normalizeTextBlock(personalDetails.dateOfBirth),
       bloodGroup: normalizeTextBlock(personalDetails.bloodGroup),
-      fatherOrMotherName: normalizeTextBlock(personalDetails.fatherOrMotherName),
+      fatherOrMotherName: normalizeTextBlock(
+        personalDetails.fatherOrMotherName,
+      ),
       spouseName: normalizeTextBlock(personalDetails.spouseName),
       address: normalizeTextBlock(personalDetails.address),
     },
@@ -250,13 +364,19 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
         ),
         panNumber: normalizeTextBlock(statutoryDetails.compliance?.panNumber),
         uanNumber: normalizeTextBlock(statutoryDetails.compliance?.uanNumber),
-        dateOfBirth: normalizeTextBlock(statutoryDetails.compliance?.dateOfBirth),
+        dateOfBirth: normalizeTextBlock(
+          statutoryDetails.compliance?.dateOfBirth,
+        ),
       },
       documents: {
         idProof: normalizeTextBlock(statutoryDetails.documents?.idProof),
-        taxDocument: normalizeTextBlock(statutoryDetails.documents?.taxDocument),
+        taxDocument: normalizeTextBlock(
+          statutoryDetails.documents?.taxDocument,
+        ),
         pfDocument: normalizeTextBlock(statutoryDetails.documents?.pfDocument),
-        otherDocument: normalizeTextBlock(statutoryDetails.documents?.otherDocument),
+        otherDocument: normalizeTextBlock(
+          statutoryDetails.documents?.otherDocument,
+        ),
       },
       notes: normalizeTextBlock(statutoryDetails.notes),
     },
@@ -279,15 +399,23 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
         workLocation: normalizeTextBlock(
           additionalInformation.workDetails?.workLocation,
         ),
-        department: normalizeTextBlock(additionalInformation.workDetails?.department),
-        reportingTo: normalizeTextBlock(additionalInformation.workDetails?.reportingTo),
-        jobTitle: normalizeTextBlock(additionalInformation.workDetails?.jobTitle),
+        department: normalizeTextBlock(
+          additionalInformation.workDetails?.department,
+        ),
+        reportingTo: normalizeTextBlock(
+          additionalInformation.workDetails?.reportingTo,
+        ),
+        jobTitle: normalizeTextBlock(
+          additionalInformation.workDetails?.jobTitle,
+        ),
       },
       leaveAttendance: {
         leavePolicy: normalizeTextBlock(
           additionalInformation.leaveAttendance?.leavePolicy,
         ),
-        weeklyOff: normalizeTextBlock(additionalInformation.leaveAttendance?.weeklyOff),
+        weeklyOff: normalizeTextBlock(
+          additionalInformation.leaveAttendance?.weeklyOff,
+        ),
         attendanceType: normalizeTextBlock(
           additionalInformation.leaveAttendance?.attendanceType,
         ),
@@ -311,8 +439,12 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
         relationship: normalizeTextBlock(
           additionalInformation.emergencyContact?.relationship,
         ),
-        phone: normalizeTextBlock(additionalInformation.emergencyContact?.phone),
-        address: normalizeTextBlock(additionalInformation.emergencyContact?.address),
+        phone: normalizeTextBlock(
+          additionalInformation.emergencyContact?.phone,
+        ),
+        address: normalizeTextBlock(
+          additionalInformation.emergencyContact?.address,
+        ),
       },
       previousEmployment: {
         employer: normalizeTextBlock(
@@ -325,7 +457,8 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
           additionalInformation.previousEmployment?.totalExperienceYears || 0,
         ),
         relevantExperienceYears: Number(
-          additionalInformation.previousEmployment?.relevantExperienceYears || 0,
+          additionalInformation.previousEmployment?.relevantExperienceYears ||
+            0,
         ),
       },
       otherInformation: {
@@ -335,11 +468,15 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
         nationality: normalizeTextBlock(
           additionalInformation.otherInformation?.nationality,
         ),
-        religion: normalizeTextBlock(additionalInformation.otherInformation?.religion),
+        religion: normalizeTextBlock(
+          additionalInformation.otherInformation?.religion,
+        ),
         languages: normalizeTextBlock(
           additionalInformation.otherInformation?.languages,
         ),
-        hobbies: normalizeTextBlock(additionalInformation.otherInformation?.hobbies),
+        hobbies: normalizeTextBlock(
+          additionalInformation.otherInformation?.hobbies,
+        ),
       },
     },
     summary: summarizeSalaryHeads(payHeads),
@@ -657,7 +794,9 @@ async function ensureCompanyCoreMasters(companyId) {
   }
 
   const existingVoucherTypes = await VoucherTypes.find({ companyId }).toArray();
-  const voucherTypeNames = new Set(existingVoucherTypes.map((row) => nameKey(row.name)));
+  const voucherTypeNames = new Set(
+    existingVoucherTypes.map((row) => nameKey(row.name)),
+  );
   if (!voucherTypeNames.has("pos voucher")) {
     await VoucherTypes.insertOne({
       companyId,
@@ -668,12 +807,25 @@ async function ensureCompanyCoreMasters(companyId) {
       systemKey: "pos-voucher",
     });
   }
+
+  if (!voucherTypeNames.has("manufacturing")) {
+    await VoucherTypes.insertOne({
+      companyId,
+      name: "Manufacturing",
+      category: "INVENTORY",
+      createdAt: now,
+      isSystem: true,
+      systemKey: "manufacturing",
+    });
+  }
 }
 
 async function ensureCompanyBaseCurrency(company) {
   if (!company?._id) return;
   const companyId = company._id;
-  const code = normalizeName(company.baseCurrencyCode || company.baseCurrencySymbol || "BDT");
+  const code = normalizeName(
+    company.baseCurrencyCode || company.baseCurrencySymbol || "BDT",
+  );
   const symbol = normalizeName(company.baseCurrencySymbol || code);
   const name = normalizeName(company.formalName || "Base Currency");
   const decimalPlaces = Number(company.decimalPlaces || 2);
@@ -716,8 +868,13 @@ async function ensureCompanyBaseCurrency(company) {
   });
 }
 
-async function buildStockSummary(companyId, fromDate = null, toDate = null) {
-  const [groups, items, vouchers] = await Promise.all([
+async function buildStockSummary(
+  companyId,
+  fromDate = null,
+  toDate = null,
+  options = {},
+) {
+  const [groups, allItems, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
     Vouchers.find({
@@ -727,6 +884,8 @@ async function buildStockSummary(companyId, fromDate = null, toDate = null) {
     }).toArray(),
   ]);
 
+  const items = allItems.filter((item) => itemMatchesRoleFilter(item, options));
+  const itemIdSet = new Set(items.map((item) => String(item._id)));
   const groupsById = new Map(groups.map((group) => [String(group._id), group]));
   const itemStateMap = new Map(
     items.map((item) => {
@@ -761,36 +920,42 @@ async function buildStockSummary(companyId, fromDate = null, toDate = null) {
       return leftTime - rightTime;
     })
     .forEach((voucher) => {
-      const direction = inferStockDirection(voucher.voucherName);
-      if (!Array.isArray(voucher.inventoryLines) || direction === 0) {
+      if (!Array.isArray(voucher.inventoryLines)) {
         return;
       }
 
       const voucherDate = voucher?.date ? new Date(voucher.date) : null;
-      const beforePeriod = fromDate && voucherDate ? voucherDate < fromDate : false;
+      const beforePeriod =
+        fromDate && voucherDate ? voucherDate < fromDate : false;
       const inPeriod =
         !fromDate ||
-        ((voucherDate && voucherDate >= fromDate) &&
+        (voucherDate &&
+          voucherDate >= fromDate &&
           (!toDate || voucherDate <= toDate));
 
       voucher.inventoryLines.forEach((line) => {
         if (!line?.itemId) return;
         const key = String(line.itemId);
-        const state =
-          itemStateMap.get(key) || {
-            openingSnapshot: { qty: 0, rate: 0, value: 0 },
-            currentQty: 0,
-            currentRate: 0,
-            movement: {
-              inwardQty: 0,
-              inwardValue: 0,
-              outwardQty: 0,
-              outwardValue: 0,
-            },
-          };
+        if (!itemIdSet.has(key)) return;
+        const state = itemStateMap.get(key) || {
+          openingSnapshot: { qty: 0, rate: 0, value: 0 },
+          currentQty: 0,
+          currentRate: 0,
+          movement: {
+            inwardQty: 0,
+            inwardValue: 0,
+            outwardQty: 0,
+            outwardValue: 0,
+          },
+        };
+
+        const direction = getInventoryLineDirection(line, voucher.voucherName);
+        if (direction === 0) return;
 
         const qty = normalizeMoney(Number(line.qty) || 0);
-        const purchaseRate = normalizeMoney(Number(line.rate) || state.currentRate || 0);
+        const purchaseRate = normalizeMoney(
+          Number(line.rate) || state.currentRate || 0,
+        );
         const costRate = normalizeMoney(state.currentRate || purchaseRate || 0);
 
         if (direction > 0) {
@@ -803,7 +968,9 @@ async function buildStockSummary(companyId, fromDate = null, toDate = null) {
               value: normalizeMoney(state.currentQty * state.currentRate),
             };
           } else if (inPeriod) {
-            state.movement.inwardQty = normalizeMoney(state.movement.inwardQty + qty);
+            state.movement.inwardQty = normalizeMoney(
+              state.movement.inwardQty + qty,
+            );
             state.movement.inwardValue = normalizeMoney(
               state.movement.inwardValue + qty * purchaseRate,
             );
@@ -821,7 +988,9 @@ async function buildStockSummary(companyId, fromDate = null, toDate = null) {
               value: normalizeMoney(state.currentQty * state.currentRate),
             };
           } else if (inPeriod) {
-            state.movement.outwardQty = normalizeMoney(state.movement.outwardQty + qty);
+            state.movement.outwardQty = normalizeMoney(
+              state.movement.outwardQty + qty,
+            );
             state.movement.outwardValue = normalizeMoney(
               state.movement.outwardValue + outwardValue,
             );
@@ -907,8 +1076,13 @@ async function buildStockSummary(companyId, fromDate = null, toDate = null) {
   return { rows, totals };
 }
 
-async function buildInventoryDetailReport(companyId, fromDate = null, toDate = null) {
-  const [groups, items, vouchers] = await Promise.all([
+async function buildInventoryDetailReport(
+  companyId,
+  fromDate = null,
+  toDate = null,
+  options = {},
+) {
+  const [groups, allItems, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
     Vouchers.find({
@@ -918,6 +1092,8 @@ async function buildInventoryDetailReport(companyId, fromDate = null, toDate = n
     }).toArray(),
   ]);
 
+  const items = allItems.filter((item) => itemMatchesRoleFilter(item, options));
+  const itemIdSet = new Set(items.map((item) => String(item._id)));
   const groupsById = new Map(groups.map((group) => [String(group._id), group]));
   const itemStateMap = new Map(
     items.map((item) => {
@@ -956,38 +1132,44 @@ async function buildInventoryDetailReport(companyId, fromDate = null, toDate = n
       return leftTime - rightTime;
     })
     .forEach((voucher) => {
-      const direction = inferStockDirection(voucher.voucherName);
-      if (!Array.isArray(voucher.inventoryLines) || direction === 0) return;
+      if (!Array.isArray(voucher.inventoryLines)) return;
 
       const voucherDate = voucher?.date ? new Date(voucher.date) : null;
-      const beforePeriod = fromDate && voucherDate ? voucherDate < fromDate : false;
+      const beforePeriod =
+        fromDate && voucherDate ? voucherDate < fromDate : false;
       const inPeriod =
         !fromDate ||
-        ((voucherDate && voucherDate >= fromDate) &&
+        (voucherDate &&
+          voucherDate >= fromDate &&
           (!toDate || voucherDate <= toDate));
 
       voucher.inventoryLines.forEach((line) => {
         if (!line?.itemId) return;
         const key = String(line.itemId);
-        const state =
-          itemStateMap.get(key) || {
-            item: {},
-            openingSnapshot: { qty: 0, rate: 0, value: 0 },
-            currentQty: 0,
-            currentRate: 0,
-            movement: {
-              inwardQty: 0,
-              inwardValue: 0,
-              outwardQty: 0,
-              outwardValue: 0,
-            },
-            lastInwardAt: null,
-            lastOutwardAt: null,
-            history: [],
-          };
+        if (!itemIdSet.has(key)) return;
+        const state = itemStateMap.get(key) || {
+          item: {},
+          openingSnapshot: { qty: 0, rate: 0, value: 0 },
+          currentQty: 0,
+          currentRate: 0,
+          movement: {
+            inwardQty: 0,
+            inwardValue: 0,
+            outwardQty: 0,
+            outwardValue: 0,
+          },
+          lastInwardAt: null,
+          lastOutwardAt: null,
+          history: [],
+        };
+
+        const direction = getInventoryLineDirection(line, voucher.voucherName);
+        if (direction === 0) return;
 
         const qty = normalizeMoney(Number(line.qty) || 0);
-        const purchaseRate = normalizeMoney(Number(line.rate) || state.currentRate || 0);
+        const purchaseRate = normalizeMoney(
+          Number(line.rate) || state.currentRate || 0,
+        );
         const effectiveRate = normalizeMoney(
           direction > 0 ? purchaseRate : state.currentRate || purchaseRate || 0,
         );
@@ -1003,7 +1185,9 @@ async function buildInventoryDetailReport(companyId, fromDate = null, toDate = n
               value: normalizeMoney(state.currentQty * state.currentRate),
             };
           } else if (inPeriod) {
-            state.movement.inwardQty = normalizeMoney(state.movement.inwardQty + qty);
+            state.movement.inwardQty = normalizeMoney(
+              state.movement.inwardQty + qty,
+            );
             state.movement.inwardValue = normalizeMoney(
               state.movement.inwardValue + value,
             );
@@ -1016,14 +1200,19 @@ async function buildInventoryDetailReport(companyId, fromDate = null, toDate = n
               dateLabel: formatDateLabel(voucher.date),
               voucherName: voucher.voucherName || "Voucher",
               number:
-                voucher.number || voucher.invoiceNumber || voucher.voucherNumber || "",
+                voucher.number ||
+                voucher.invoiceNumber ||
+                voucher.voucherNumber ||
+                "",
               direction: "IN",
               qty,
               rate: effectiveRate,
               value,
               closingQty: state.currentQty,
               closingRate: state.currentRate,
-              closingValue: normalizeMoney(state.currentQty * state.currentRate),
+              closingValue: normalizeMoney(
+                state.currentQty * state.currentRate,
+              ),
               itemName: normalizeName(line.itemName || state.item?.name || ""),
             });
           }
@@ -1036,7 +1225,9 @@ async function buildInventoryDetailReport(companyId, fromDate = null, toDate = n
               value: normalizeMoney(state.currentQty * state.currentRate),
             };
           } else if (inPeriod) {
-            state.movement.outwardQty = normalizeMoney(state.movement.outwardQty + qty);
+            state.movement.outwardQty = normalizeMoney(
+              state.movement.outwardQty + qty,
+            );
             state.movement.outwardValue = normalizeMoney(
               state.movement.outwardValue + value,
             );
@@ -1048,14 +1239,19 @@ async function buildInventoryDetailReport(companyId, fromDate = null, toDate = n
               dateLabel: formatDateLabel(voucher.date),
               voucherName: voucher.voucherName || "Voucher",
               number:
-                voucher.number || voucher.invoiceNumber || voucher.voucherNumber || "",
+                voucher.number ||
+                voucher.invoiceNumber ||
+                voucher.voucherNumber ||
+                "",
               direction: "OUT",
               qty,
               rate: effectiveRate,
               value,
               closingQty: state.currentQty,
               closingRate: state.currentRate,
-              closingValue: normalizeMoney(state.currentQty * state.currentRate),
+              closingValue: normalizeMoney(
+                state.currentQty * state.currentRate,
+              ),
               itemName: normalizeName(line.itemName || state.item?.name || ""),
             });
           }
@@ -1075,7 +1271,8 @@ async function buildInventoryDetailReport(companyId, fromDate = null, toDate = n
       const closingRate = normalizeMoney(state.currentRate || openingRate || 0);
       const closingValue = normalizeMoney(closingQty * closingRate);
       const totalMovementQty = normalizeMoney(
-        Number(state.movement.inwardQty || 0) + Number(state.movement.outwardQty || 0),
+        Number(state.movement.inwardQty || 0) +
+          Number(state.movement.outwardQty || 0),
       );
       const stockTurnover = openingQty
         ? normalizeMoney(Number(state.movement.outwardQty || 0) / openingQty)
@@ -1148,19 +1345,27 @@ function buildMovementMetrics(source = {}) {
   return {
     openingQty,
     openingRate:
-      openingQty !== 0 ? normalizeMoney(Math.abs(openingValue) / Math.abs(openingQty)) : 0,
+      openingQty !== 0
+        ? normalizeMoney(Math.abs(openingValue) / Math.abs(openingQty))
+        : 0,
     openingValue,
     inwardQty,
     inwardRate:
-      inwardQty !== 0 ? normalizeMoney(Math.abs(inwardValue) / Math.abs(inwardQty)) : 0,
+      inwardQty !== 0
+        ? normalizeMoney(Math.abs(inwardValue) / Math.abs(inwardQty))
+        : 0,
     inwardValue,
     outwardQty,
     outwardRate:
-      outwardQty !== 0 ? normalizeMoney(Math.abs(outwardValue) / Math.abs(outwardQty)) : 0,
+      outwardQty !== 0
+        ? normalizeMoney(Math.abs(outwardValue) / Math.abs(outwardQty))
+        : 0,
     outwardValue,
     closingQty,
     closingRate:
-      closingQty !== 0 ? normalizeMoney(Math.abs(closingValue) / Math.abs(closingQty)) : 0,
+      closingQty !== 0
+        ? normalizeMoney(Math.abs(closingValue) / Math.abs(closingQty))
+        : 0,
     closingValue,
   };
 }
@@ -1179,14 +1384,30 @@ function emptyMovementAccumulator() {
 }
 
 function addMovementTotals(target, source = {}) {
-  target.openingQty = normalizeMoney(target.openingQty + Number(source.openingQty || 0));
-  target.openingValue = normalizeMoney(target.openingValue + Number(source.openingValue || 0));
-  target.inwardQty = normalizeMoney(target.inwardQty + Number(source.inwardQty || 0));
-  target.inwardValue = normalizeMoney(target.inwardValue + Number(source.inwardValue || 0));
-  target.outwardQty = normalizeMoney(target.outwardQty + Number(source.outwardQty || 0));
-  target.outwardValue = normalizeMoney(target.outwardValue + Number(source.outwardValue || 0));
-  target.closingQty = normalizeMoney(target.closingQty + Number(source.closingQty || 0));
-  target.closingValue = normalizeMoney(target.closingValue + Number(source.closingValue || 0));
+  target.openingQty = normalizeMoney(
+    target.openingQty + Number(source.openingQty || 0),
+  );
+  target.openingValue = normalizeMoney(
+    target.openingValue + Number(source.openingValue || 0),
+  );
+  target.inwardQty = normalizeMoney(
+    target.inwardQty + Number(source.inwardQty || 0),
+  );
+  target.inwardValue = normalizeMoney(
+    target.inwardValue + Number(source.inwardValue || 0),
+  );
+  target.outwardQty = normalizeMoney(
+    target.outwardQty + Number(source.outwardQty || 0),
+  );
+  target.outwardValue = normalizeMoney(
+    target.outwardValue + Number(source.outwardValue || 0),
+  );
+  target.closingQty = normalizeMoney(
+    target.closingQty + Number(source.closingQty || 0),
+  );
+  target.closingValue = normalizeMoney(
+    target.closingValue + Number(source.closingValue || 0),
+  );
 }
 
 function basePartyName(value = "") {
@@ -1212,8 +1433,8 @@ function resolveInventoryPartyMeta(voucher, ledgerMap) {
     direction > 0
       ? lines.filter((line) => Number(line.credit || 0) > 0)
       : direction < 0
-        ? lines.filter((line) => Number(line.debit || 0) > 0)
-        : lines;
+      ? lines.filter((line) => Number(line.debit || 0) > 0)
+      : lines;
 
   const ledgerName =
     preferredLines
@@ -1234,7 +1455,14 @@ async function buildInventoryMovementDimensionReport(
   toDate = null,
   dimension = "stock-item",
 ) {
-  const detailReport = await buildInventoryDetailReport(companyId, fromDate, toDate);
+  const detailReport = await buildInventoryDetailReport(
+    companyId,
+    fromDate,
+    toDate,
+    {
+      excludeRoles: ["raw_material"],
+    },
+  );
 
   if (["stock-item", "stock-group", "stock-category"].includes(dimension)) {
     const [items, categories] = await Promise.all([
@@ -1243,7 +1471,9 @@ async function buildInventoryMovementDimensionReport(
     ]);
 
     const itemById = new Map(items.map((item) => [String(item._id), item]));
-    const categoryById = new Map(categories.map((row) => [String(row._id), row.name]));
+    const categoryById = new Map(
+      categories.map((row) => [String(row._id), row.name]),
+    );
     const accumulator = new Map();
 
     detailReport.rows.forEach((row) => {
@@ -1260,7 +1490,12 @@ async function buildInventoryMovementDimensionReport(
       if (dimension === "stock-group") {
         key = String(row.groupId || row.groupName || "ungrouped");
         label = row.groupName || "Ungrouped";
-        secondaryLabel = `${detailReport.rows.filter((entry) => String(entry.groupId || "") === String(row.groupId || "")).length} items`;
+        secondaryLabel = `${
+          detailReport.rows.filter(
+            (entry) =>
+              String(entry.groupId || "") === String(row.groupId || ""),
+          ).length
+        } items`;
       } else if (dimension === "stock-category") {
         key = normalizeName(categoryName).toLowerCase() || "uncategorized";
         label = categoryName;
@@ -1297,16 +1532,20 @@ async function buildInventoryMovementDimensionReport(
     };
   }
 
-  const [vouchers, ledgers] = await Promise.all([
+  const [vouchers, ledgers, items] = await Promise.all([
     Vouchers.find({
       companyId,
       ...(toDate ? { date: { $lte: toDate } } : {}),
       inventoryLines: { $exists: true, $ne: [] },
     }).toArray(),
     Ledgers.find({ companyId }).toArray(),
+    Items.find({ companyId }).toArray(),
   ]);
 
-  const ledgerMap = new Map(ledgers.map((ledger) => [String(ledger._id), ledger.name]));
+  const ledgerMap = new Map(
+    ledgers.map((ledger) => [String(ledger._id), ledger.name]),
+  );
+  const itemMap = new Map(items.map((item) => [String(item._id), item]));
   const stateMap = new Map();
 
   vouchers
@@ -1317,23 +1556,25 @@ async function buildInventoryMovementDimensionReport(
       return leftTime - rightTime;
     })
     .forEach((voucher) => {
-      const direction = inferStockDirection(voucher.voucherName);
-      if (!Array.isArray(voucher.inventoryLines) || direction === 0) return;
+      if (!Array.isArray(voucher.inventoryLines)) return;
 
       const voucherDate = voucher?.date ? new Date(voucher.date) : null;
-      const beforePeriod = fromDate && voucherDate ? voucherDate < fromDate : false;
+      const beforePeriod =
+        fromDate && voucherDate ? voucherDate < fromDate : false;
       const inPeriod =
         !fromDate ||
-        ((voucherDate && voucherDate >= fromDate) && (!toDate || voucherDate <= toDate));
+        (voucherDate &&
+          voucherDate >= fromDate &&
+          (!toDate || voucherDate <= toDate));
 
       const partyMeta = resolveInventoryPartyMeta(voucher, ledgerMap);
       const key =
         dimension === "group"
           ? normalizeName(partyMeta.groupName).toLowerCase()
           : normalizeName(partyMeta.ledgerName).toLowerCase();
-      const label = dimension === "group" ? partyMeta.groupName : partyMeta.ledgerName;
-      const secondaryLabel =
-        dimension === "group" ? "" : partyMeta.groupName;
+      const label =
+        dimension === "group" ? partyMeta.groupName : partyMeta.ledgerName;
+      const secondaryLabel = dimension === "group" ? "" : partyMeta.groupName;
 
       const state = stateMap.get(key) || {
         id: key,
@@ -1343,6 +1584,13 @@ async function buildInventoryMovementDimensionReport(
       };
 
       voucher.inventoryLines.forEach((line) => {
+        if (!line?.itemId) return;
+        const item = itemMap.get(String(line.itemId)) || {};
+        if (inventoryRoleKey(item.inventoryRole) === "raw_material") return;
+
+        const direction = getInventoryLineDirection(line, voucher.voucherName);
+        if (direction === 0) return;
+
         const qty = normalizeMoney(Number(line.qty) || 0);
         const rate = normalizeMoney(Number(line.rate) || 0);
         const value = normalizeMoney(Number(line.amount) || qty * rate);
@@ -1358,11 +1606,19 @@ async function buildInventoryMovementDimensionReport(
 
         if (inPeriod) {
           if (direction > 0) {
-            state.metrics.inwardQty = normalizeMoney(state.metrics.inwardQty + qty);
-            state.metrics.inwardValue = normalizeMoney(state.metrics.inwardValue + value);
+            state.metrics.inwardQty = normalizeMoney(
+              state.metrics.inwardQty + qty,
+            );
+            state.metrics.inwardValue = normalizeMoney(
+              state.metrics.inwardValue + value,
+            );
           } else {
-            state.metrics.outwardQty = normalizeMoney(state.metrics.outwardQty + qty);
-            state.metrics.outwardValue = normalizeMoney(state.metrics.outwardValue + value);
+            state.metrics.outwardQty = normalizeMoney(
+              state.metrics.outwardQty + qty,
+            );
+            state.metrics.outwardValue = normalizeMoney(
+              state.metrics.outwardValue + value,
+            );
           }
         }
 
@@ -1382,9 +1638,15 @@ async function buildInventoryMovementDimensionReport(
       ...row,
       metrics: buildMovementMetrics({
         ...row.metrics,
-        closingQty: normalizeMoney(row.metrics.openingQty + row.metrics.inwardQty - row.metrics.outwardQty),
+        closingQty: normalizeMoney(
+          row.metrics.openingQty +
+            row.metrics.inwardQty -
+            row.metrics.outwardQty,
+        ),
         closingValue: normalizeMoney(
-          row.metrics.openingValue + row.metrics.inwardValue - row.metrics.outwardValue,
+          row.metrics.openingValue +
+            row.metrics.inwardValue -
+            row.metrics.outwardValue,
         ),
       }),
     }))
@@ -1401,8 +1663,13 @@ async function buildInventoryMovementDimensionReport(
   };
 }
 
-async function buildStockGroupSummary(companyId, fromDate = null, toDate = null) {
-  const summary = await buildStockSummary(companyId, fromDate, toDate);
+async function buildStockGroupSummary(
+  companyId,
+  fromDate = null,
+  toDate = null,
+  options = {},
+) {
+  const summary = await buildStockSummary(companyId, fromDate, toDate, options);
   const groups = await Groups.find({ companyId }).toArray();
   const groupById = new Map(groups.map((group) => [String(group._id), group]));
   const childrenByParent = new Map();
@@ -1429,7 +1696,9 @@ async function buildStockGroupSummary(companyId, fromDate = null, toDate = null)
   }
 
   const primaryGroup = groups.find((group) =>
-    ["stock-in-trade", "stock in trade", "primary"].includes(nameKey(group.name)),
+    ["stock-in-trade", "stock in trade", "primary"].includes(
+      nameKey(group.name),
+    ),
   );
 
   function emptyMetrics() {
@@ -1446,14 +1715,30 @@ async function buildStockGroupSummary(companyId, fromDate = null, toDate = null)
   }
 
   function addMetrics(target, source) {
-    target.openingQty = normalizeMoney(target.openingQty + Number(source.openingQty || 0));
-    target.openingValue = normalizeMoney(target.openingValue + Number(source.openingValue || 0));
-    target.inwardQty = normalizeMoney(target.inwardQty + Number(source.inwardQty || 0));
-    target.inwardValue = normalizeMoney(target.inwardValue + Number(source.inwardValue || 0));
-    target.outwardQty = normalizeMoney(target.outwardQty + Number(source.outwardQty || 0));
-    target.outwardValue = normalizeMoney(target.outwardValue + Number(source.outwardValue || 0));
-    target.closingQty = normalizeMoney(target.closingQty + Number(source.closingQty || 0));
-    target.closingValue = normalizeMoney(target.closingValue + Number(source.closingValue || 0));
+    target.openingQty = normalizeMoney(
+      target.openingQty + Number(source.openingQty || 0),
+    );
+    target.openingValue = normalizeMoney(
+      target.openingValue + Number(source.openingValue || 0),
+    );
+    target.inwardQty = normalizeMoney(
+      target.inwardQty + Number(source.inwardQty || 0),
+    );
+    target.inwardValue = normalizeMoney(
+      target.inwardValue + Number(source.inwardValue || 0),
+    );
+    target.outwardQty = normalizeMoney(
+      target.outwardQty + Number(source.outwardQty || 0),
+    );
+    target.outwardValue = normalizeMoney(
+      target.outwardValue + Number(source.outwardValue || 0),
+    );
+    target.closingQty = normalizeMoney(
+      target.closingQty + Number(source.closingQty || 0),
+    );
+    target.closingValue = normalizeMoney(
+      target.closingValue + Number(source.closingValue || 0),
+    );
   }
 
   function finalizeMetrics(metrics) {
@@ -1484,8 +1769,8 @@ async function buildStockGroupSummary(companyId, fromDate = null, toDate = null)
   }
 
   function buildNode(group, level = 0) {
-    const childGroups = (childrenByParent.get(String(group._id)) || []).map((child) =>
-      buildNode(child, level + 1),
+    const childGroups = (childrenByParent.get(String(group._id)) || []).map(
+      (child) => buildNode(child, level + 1),
     );
     const itemRows = (itemsByGroup.get(String(group._id)) || []).map((row) => ({
       type: "item",
@@ -1592,6 +1877,242 @@ async function isStockGroup(companyId, groupId) {
   return false;
 }
 
+function normalizeBomComponentPayload(component = {}) {
+  return {
+    itemId:
+      component.itemId && ObjectId.isValid(component.itemId)
+        ? new ObjectId(component.itemId)
+        : null,
+    itemName: normalizeName(component.itemName || ""),
+    description: normalizeTextBlock(component.description || ""),
+    qty: normalizeMoney(component.qty || 0),
+    unitId:
+      component.unitId && ObjectId.isValid(component.unitId)
+        ? new ObjectId(component.unitId)
+        : null,
+    unitName: normalizeName(component.unitName || ""),
+  };
+}
+
+function normalizeAdditionalCostPayload(cost = {}) {
+  return {
+    label: normalizeName(cost.label || cost.type || "Additional Cost"),
+    amount: normalizeMoney(cost.amount || 0),
+  };
+}
+
+async function enrichBomWithAvailability(
+  companyId,
+  bom,
+  rawMaterialSummary = null,
+) {
+  const rawSummary =
+    rawMaterialSummary ||
+    (await buildStockSummary(companyId, null, null, {
+      includeRoles: ["raw_material"],
+    }));
+  const rowsByItemId = new Map(
+    (rawSummary.rows || []).map((row) => [String(row.itemId), row]),
+  );
+
+  let maxProducible = Number.POSITIVE_INFINITY;
+  const outputQty = normalizeMoney(bom.outputQty || 1) || 1;
+  let totalComponentCost = 0;
+
+  const components = (bom.components || []).map((component) => {
+    const stockRow = rowsByItemId.get(String(component.itemId)) || {};
+    const availableQty = normalizeMoney(stockRow.closingQty || 0);
+    const rate = normalizeMoney(stockRow.closingRate || component.rate || 0);
+    const requiredPerUnit =
+      outputQty !== 0
+        ? normalizeMoney((Number(component.qty) || 0) / outputQty)
+        : 0;
+    const possibleOutput =
+      requiredPerUnit > 0
+        ? Math.floor((availableQty / requiredPerUnit) * 100) / 100
+        : Number.POSITIVE_INFINITY;
+
+    if (requiredPerUnit > 0) {
+      maxProducible = Math.min(maxProducible, possibleOutput);
+    }
+
+    totalComponentCost = normalizeMoney(
+      totalComponentCost + (Number(component.qty) || 0) * rate,
+    );
+
+    return {
+      ...component,
+      availableQty,
+      currentRate: rate,
+      currentValue: normalizeMoney(availableQty * rate),
+      requiredPerUnit,
+      possibleOutput:
+        possibleOutput === Number.POSITIVE_INFINITY
+          ? null
+          : normalizeMoney(possibleOutput),
+    };
+  });
+
+  const additionalCost = (bom.additionalCosts || []).reduce(
+    (sum, row) => normalizeMoney(sum + Number(row.amount || 0)),
+    0,
+  );
+  const totalCost = normalizeMoney(totalComponentCost + additionalCost);
+  const effectiveRate = outputQty ? normalizeMoney(totalCost / outputQty) : 0;
+
+  return {
+    ...bom,
+    components,
+    totalComponentCost,
+    additionalCost,
+    totalCost,
+    effectiveRate,
+    maxProducible:
+      maxProducible === Number.POSITIVE_INFINITY
+        ? 0
+        : normalizeMoney(maxProducible),
+  };
+}
+
+async function buildManufacturingRawMaterialSummary(
+  companyId,
+  fromDate = null,
+  toDate = null,
+) {
+  return buildInventoryDetailReport(companyId, fromDate, toDate, {
+    includeRoles: ["raw_material"],
+  });
+}
+
+async function buildProductionRegister(
+  companyId,
+  fromDate = null,
+  toDate = null,
+) {
+  const [vouchers, companies] = await Promise.all([
+    Vouchers.find({
+      companyId,
+      ...(fromDate || toDate
+        ? {
+            date: {
+              ...(fromDate ? { $gte: fromDate } : {}),
+              ...(toDate ? { $lte: toDate } : {}),
+            },
+          }
+        : {}),
+      "manufacturingMeta.outputItemId": { $exists: true },
+    })
+      .sort({ date: -1, createdAt: -1 })
+      .toArray(),
+    Companies.findOne({ _id: companyId }),
+  ]);
+
+  const rows = vouchers.map((voucher) => {
+    const meta = voucher.manufacturingMeta || {};
+    const outputLine =
+      (voucher.inventoryLines || []).find(
+        (line) => getInventoryLineDirection(line, voucher.voucherName) > 0,
+      ) || {};
+    const componentCount = (voucher.inventoryLines || []).filter(
+      (line) => getInventoryLineDirection(line, voucher.voucherName) < 0,
+    ).length;
+
+    return {
+      voucherId: voucher._id,
+      voucherName: voucher.voucherName || "Manufacturing",
+      number:
+        voucher.number ||
+        formatProductionNumber(companies?.name || "company", 0),
+      date: voucher.date,
+      dateLabel: formatDateLabel(voucher.date),
+      bomId: meta.bomId || null,
+      bomName: meta.bomName || "",
+      outputItemId: meta.outputItemId || outputLine.itemId || null,
+      outputItemName: meta.outputItemName || outputLine.itemName || "",
+      outputQty: normalizeMoney(meta.outputQty || outputLine.qty || 0),
+      effectiveRate: normalizeMoney(meta.effectiveRate || outputLine.rate || 0),
+      totalCost: normalizeMoney(meta.totalCost || outputLine.amount || 0),
+      componentCount,
+      notes: meta.notes || voucher.narration || "",
+    };
+  });
+
+  const totals = rows.reduce(
+    (sum, row) => ({
+      outputQty: normalizeMoney(sum.outputQty + Number(row.outputQty || 0)),
+      totalCost: normalizeMoney(sum.totalCost + Number(row.totalCost || 0)),
+    }),
+    { outputQty: 0, totalCost: 0 },
+  );
+
+  return { rows, totals };
+}
+
+async function buildComponentConsumptionReport(
+  companyId,
+  fromDate = null,
+  toDate = null,
+) {
+  const [vouchers, items] = await Promise.all([
+    Vouchers.find({
+      companyId,
+      ...(fromDate || toDate
+        ? {
+            date: {
+              ...(fromDate ? { $gte: fromDate } : {}),
+              ...(toDate ? { $lte: toDate } : {}),
+            },
+          }
+        : {}),
+      "manufacturingMeta.outputItemId": { $exists: true },
+      inventoryLines: { $exists: true, $ne: [] },
+    }).toArray(),
+    Items.find({ companyId }).toArray(),
+  ]);
+
+  const itemMap = new Map(items.map((item) => [String(item._id), item]));
+  const accumulator = new Map();
+
+  vouchers.forEach((voucher) => {
+    (voucher.inventoryLines || []).forEach((line) => {
+      if (getInventoryLineDirection(line, voucher.voucherName) >= 0) return;
+      const item = itemMap.get(String(line.itemId)) || {};
+      const role = inventoryRoleKey(item.inventoryRole);
+      if (role !== "raw_material") return;
+
+      const key = String(line.itemId);
+      const state = accumulator.get(key) || {
+        itemId: line.itemId,
+        itemName: normalizeName(line.itemName || item.name || ""),
+        unitName: normalizeName(item.unitOfMeasure || line.unitName || ""),
+        qty: 0,
+        value: 0,
+        rate: 0,
+        lastUsedOn: null,
+      };
+
+      state.qty = normalizeMoney(state.qty + Number(line.qty || 0));
+      state.value = normalizeMoney(state.value + Number(line.amount || 0));
+      state.rate = state.qty ? normalizeMoney(state.value / state.qty) : 0;
+      state.lastUsedOn = voucher.date || state.lastUsedOn;
+      accumulator.set(key, state);
+    });
+  });
+
+  const rows = [...accumulator.values()].sort((left, right) =>
+    left.itemName.localeCompare(right.itemName),
+  );
+  const totals = rows.reduce(
+    (sum, row) => ({
+      qty: normalizeMoney(sum.qty + Number(row.qty || 0)),
+      value: normalizeMoney(sum.value + Number(row.value || 0)),
+    }),
+    { qty: 0, value: 0 },
+  );
+
+  return { rows, totals };
+}
+
 // ---------- CONNECT MONGODB ----------
 async function connectDb() {
   const client = new MongoClient(MONGO_URI);
@@ -1602,6 +2123,7 @@ async function connectDb() {
   Ledgers = db.collection("ledgers");
   VoucherTypes = db.collection("voucherTypes");
   Vouchers = db.collection("vouchers");
+  Boms = db.collection("boms");
   Customers = db.collection("customers");
   Employees = db.collection("employees");
   Items = db.collection("items");
@@ -1825,7 +2347,14 @@ async function seedDefaultMasters(companyId) {
     { companyId, name: "Receipt", category: "ACCOUNTING", createdAt: now },
     { companyId, name: "Journal", category: "ACCOUNTING", createdAt: now },
     { companyId, name: "Sales", category: "ACCOUNTING", createdAt: now },
-    { companyId, name: "POS Voucher", category: "ACCOUNTING", createdAt: now, isSystem: true, systemKey: "pos-voucher" },
+    {
+      companyId,
+      name: "POS Voucher",
+      category: "ACCOUNTING",
+      createdAt: now,
+      isSystem: true,
+      systemKey: "pos-voucher",
+    },
     { companyId, name: "Purchase", category: "ACCOUNTING", createdAt: now },
     { companyId, name: "Debit Note", category: "ACCOUNTING", createdAt: now },
     { companyId, name: "Credit Note", category: "ACCOUNTING", createdAt: now },
@@ -2636,13 +3165,17 @@ app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
 
     const normalizedPhone = normalizePhone(customer?.phone);
     if (!normalizedPhone) {
-      return res.status(400).json({ message: "Customer phone number is required" });
+      return res
+        .status(400)
+        .json({ message: "Customer phone number is required" });
     }
     if (!normalizeName(customer?.name)) {
       return res.status(400).json({ message: "Customer name is required" });
     }
     if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ message: "At least one POS item is required" });
+      return res
+        .status(400)
+        .json({ message: "At least one POS item is required" });
     }
 
     const posVoucherType =
@@ -2660,13 +3193,20 @@ app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
       return res.status(400).json({ message: "POS Voucher type not found" });
     }
 
-    const { salesLedger, cashLedger, bankLedger } = await resolveDefaultPosLedgers(companyId);
+    const { salesLedger, cashLedger, bankLedger } =
+      await resolveDefaultPosLedgers(companyId);
     const resolvedSalesLedger =
-      (salesLedgerId && (await Ledgers.findOne({ _id: new ObjectId(salesLedgerId), companyId }))) ||
+      (salesLedgerId &&
+        (await Ledgers.findOne({
+          _id: new ObjectId(salesLedgerId),
+          companyId,
+        }))) ||
       salesLedger;
 
     if (!resolvedSalesLedger) {
-      return res.status(400).json({ message: "Sales ledger is missing for this company" });
+      return res
+        .status(400)
+        .json({ message: "Sales ledger is missing for this company" });
     }
 
     const itemIds = items
@@ -2679,7 +3219,9 @@ app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
     ]);
     const itemMap = new Map(itemDocs.map((row) => [String(row._id), row]));
     const groupMap = new Map(groups.map((row) => [String(row._id), row]));
-    const categoryMap = new Map(categories.map((row) => [String(row._id), row]));
+    const categoryMap = new Map(
+      categories.map((row) => [String(row._id), row]),
+    );
 
     const inventoryLines = items
       .filter((row) => row?.itemId && itemMap.has(String(row.itemId)))
@@ -2709,7 +3251,9 @@ app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
           discountValue: rowDiscountValue,
           groupId: item.groupId || null,
           groupName: normalizeName(
-            row.groupName || groupMap.get(String(item.groupId || ""))?.name || "",
+            row.groupName ||
+              groupMap.get(String(item.groupId || ""))?.name ||
+              "",
           ),
           stockCategoryId: item.stockCategoryId || null,
           stockCategoryName: normalizeName(
@@ -2735,23 +3279,35 @@ app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
         ? normalizeMoney(subtotal * (Number(discountValue || 0) / 100))
         : normalizeMoney(discountValue || 0);
     const rewardRedeemed = normalizeMoney(redeemedPoints || 0);
-    const totalAmount = normalizeMoney(subtotal - invoiceDiscount - rewardRedeemed);
+    const totalAmount = normalizeMoney(
+      subtotal - invoiceDiscount - rewardRedeemed,
+    );
 
     const cashAmount = normalizeMoney(payments.cash || 0);
     const cardAmount = normalizeMoney(payments.card || 0);
     const totalPaid = normalizeMoney(cashAmount + cardAmount);
 
     if (normalizeMoney(totalPaid) !== normalizeMoney(totalAmount)) {
-      return res.status(400).json({ message: "Payment total must match total amount payable" });
+      return res
+        .status(400)
+        .json({ message: "Payment total must match total amount payable" });
     }
 
     const rewardEarned = normalizeMoney(
-      inventoryLines.reduce((sum, row) => sum + Number(row.mrpRate || 0) * Number(row.qty || 0), 0),
+      inventoryLines.reduce(
+        (sum, row) => sum + Number(row.mrpRate || 0) * Number(row.qty || 0),
+        0,
+      ),
     );
 
-    const existingCustomer = await Customers.findOne({ companyId, phone: normalizedPhone });
+    const existingCustomer = await Customers.findOne({
+      companyId,
+      phone: normalizedPhone,
+    });
     if (rewardRedeemed > Number(existingCustomer?.rewardPoints || 0)) {
-      return res.status(400).json({ message: "Customer does not have enough reward points" });
+      return res
+        .status(400)
+        .json({ message: "Customer does not have enough reward points" });
     }
 
     const customerDoc = await upsertPosCustomer(companyId, customer, {
@@ -2764,17 +3320,25 @@ app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
     const lines = [];
     if (cashAmount > 0) {
       if (!cashLedger) {
-        return res.status(400).json({ message: "Cash ledger is missing for POS cash payment" });
+        return res
+          .status(400)
+          .json({ message: "Cash ledger is missing for POS cash payment" });
       }
       lines.push({ ledgerId: cashLedger._id, debit: cashAmount, credit: 0 });
     }
     if (cardAmount > 0) {
       if (!bankLedger) {
-        return res.status(400).json({ message: "Bank ledger is missing for POS card payment" });
+        return res
+          .status(400)
+          .json({ message: "Bank ledger is missing for POS card payment" });
       }
       lines.push({ ledgerId: bankLedger._id, debit: cardAmount, credit: 0 });
     }
-    lines.push({ ledgerId: resolvedSalesLedger._id, debit: 0, credit: totalAmount });
+    lines.push({
+      ledgerId: resolvedSalesLedger._id,
+      debit: 0,
+      credit: totalAmount,
+    });
 
     const doc = {
       companyId,
@@ -2808,277 +3372,350 @@ app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
     };
 
     const result = await Vouchers.insertOne(doc);
-    res.status(201).json({ _id: result.insertedId, ...doc, customer: customerDoc });
+    res
+      .status(201)
+      .json({ _id: result.insertedId, ...doc, customer: customerDoc });
   } catch (err) {
     console.error("Error creating POS voucher:", err);
-    res.status(500).json({ message: err.message || "Error creating POS voucher" });
+    res
+      .status(500)
+      .json({ message: err.message || "Error creating POS voucher" });
   }
 });
 
-app.get("/companies/:companyId/reports/customer-behaviour/overview", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const fromDate = safeDate(req.query.from);
-    const toDate = safeDate(req.query.to);
-    const voucherFilter = {
-      companyId,
-      voucherName: { $regex: "^POS Voucher$", $options: "i" },
-    };
-    if (fromDate || toDate) {
-      voucherFilter.date = {};
-      if (fromDate) voucherFilter.date.$gte = fromDate;
-      if (toDate) {
-        const inclusiveTo = new Date(toDate);
-        inclusiveTo.setHours(23, 59, 59, 999);
-        voucherFilter.date.$lte = inclusiveTo;
+app.get(
+  "/companies/:companyId/reports/customer-behaviour/overview",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      const voucherFilter = {
+        companyId,
+        voucherName: { $regex: "^POS Voucher$", $options: "i" },
+      };
+      if (fromDate || toDate) {
+        voucherFilter.date = {};
+        if (fromDate) voucherFilter.date.$gte = fromDate;
+        if (toDate) {
+          const inclusiveTo = new Date(toDate);
+          inclusiveTo.setHours(23, 59, 59, 999);
+          voucherFilter.date.$lte = inclusiveTo;
+        }
       }
-    }
 
-    const [customers, vouchers] = await Promise.all([
-      Customers.find({ companyId }).sort({ lastPurchaseAt: -1, name: 1 }).toArray(),
-      Vouchers.find(voucherFilter).sort({ date: -1 }).toArray(),
-    ]);
+      const [customers, vouchers] = await Promise.all([
+        Customers.find({ companyId })
+          .sort({ lastPurchaseAt: -1, name: 1 })
+          .toArray(),
+        Vouchers.find(voucherFilter).sort({ date: -1 }).toArray(),
+      ]);
 
-    const uniqueCustomerIds = new Set(
-      vouchers.filter((voucher) => voucher.customerId).map((voucher) => String(voucher.customerId)),
-    );
-    const totalSales = normalizeMoney(
-      vouchers.reduce((sum, voucher) => sum + Number(voucher.posMeta?.totalAmount || 0), 0),
-    );
-    const totalRewardsEarned = normalizeMoney(
-      vouchers.reduce((sum, voucher) => sum + Number(voucher.posMeta?.rewardEarned || 0), 0),
-    );
-    const totalRewardsRedeemed = normalizeMoney(
-      vouchers.reduce((sum, voucher) => sum + Number(voucher.posMeta?.rewardRedeemed || 0), 0),
-    );
-
-    const customerRows = customers.map((customer) => {
-      const customerVouchers = vouchers.filter(
-        (voucher) => String(voucher.customerId || "") === String(customer._id),
+      const uniqueCustomerIds = new Set(
+        vouchers
+          .filter((voucher) => voucher.customerId)
+          .map((voucher) => String(voucher.customerId)),
       );
-      const spent = normalizeMoney(
-        customerVouchers.reduce(
+      const totalSales = normalizeMoney(
+        vouchers.reduce(
           (sum, voucher) => sum + Number(voucher.posMeta?.totalAmount || 0),
           0,
         ),
       );
-      return {
-        customerId: customer._id,
-        name: customer.name,
-        phone: customer.phone,
-        address: customer.address || "",
-        rewardPoints: normalizeMoney(customer.rewardPoints || 0),
-        totalOrders: customerVouchers.length,
-        totalSpent: spent,
-        averageOrderValue: customerVouchers.length
-          ? normalizeMoney(spent / customerVouchers.length)
-          : 0,
-        lastPurchaseAt:
-          customerVouchers[0]?.date || customer.lastPurchaseAt || null,
-      };
-    });
+      const totalRewardsEarned = normalizeMoney(
+        vouchers.reduce(
+          (sum, voucher) => sum + Number(voucher.posMeta?.rewardEarned || 0),
+          0,
+        ),
+      );
+      const totalRewardsRedeemed = normalizeMoney(
+        vouchers.reduce(
+          (sum, voucher) => sum + Number(voucher.posMeta?.rewardRedeemed || 0),
+          0,
+        ),
+      );
 
-    res.json({
-      summary: {
-        totalCustomers: customers.length,
-        activeCustomers: uniqueCustomerIds.size,
-        totalOrders: vouchers.length,
-        totalSales,
-        totalRewardsEarned,
-        totalRewardsRedeemed,
-      },
-      customers: customerRows,
-      recentVouchers: vouchers.slice(0, 20).map((voucher) => ({
-        voucherId: voucher._id,
-        date: voucher.date,
-        number: voucher.number,
-        customerName: voucher.customerSnapshot?.name || "",
-        phone: voucher.customerSnapshot?.phone || "",
-        totalAmount: normalizeMoney(voucher.posMeta?.totalAmount || 0),
-        rewardEarned: normalizeMoney(voucher.posMeta?.rewardEarned || 0),
-      })),
-    });
-  } catch (err) {
-    console.error("Error loading customer behaviour overview:", err);
-    res.status(500).json({ message: "Error loading customer behaviour overview" });
-  }
-});
-
-app.get("/companies/:companyId/reports/customer-behaviour/product-wise", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const itemId = req.query.itemId && ObjectId.isValid(req.query.itemId)
-      ? new ObjectId(req.query.itemId)
-      : null;
-    const vouchers = await Vouchers.find({
-      companyId,
-      voucherName: { $regex: "^POS Voucher$", $options: "i" },
-    }).sort({ date: -1 }).toArray();
-
-    const productMap = new Map();
-    vouchers.forEach((voucher) => {
-      (voucher.inventoryLines || []).forEach((line) => {
-        if (itemId && String(line.itemId) !== String(itemId)) return;
-        const key = String(line.itemId);
-        if (!productMap.has(key)) {
-          productMap.set(key, {
-            itemId: line.itemId,
-            itemName: line.itemName,
-            groupName: line.groupName || "",
-            stockCategoryName: line.stockCategoryName || "",
-            totalQty: 0,
-            totalAmount: 0,
-            customers: [],
-          });
-        }
-        const current = productMap.get(key);
-        current.totalQty = normalizeMoney(current.totalQty + Number(line.qty || 0));
-        current.totalAmount = normalizeMoney(current.totalAmount + Number(line.amount || 0));
-        current.customers.push({
-          customerId: voucher.customerId || null,
-          customerName: voucher.customerSnapshot?.name || "",
-          phone: voucher.customerSnapshot?.phone || "",
-          address: voucher.customerSnapshot?.address || "",
-          voucherId: voucher._id,
-          voucherNo: voucher.number || "",
-          purchaseDate: voucher.date,
-          qty: Number(line.qty || 0),
-          amount: normalizeMoney(line.amount || 0),
-        });
-      });
-    });
-
-    res.json(
-      [...productMap.values()]
-        .map((row) => ({
-          ...row,
-          uniqueCustomers: new Set(row.customers.map((entry) => entry.phone || String(entry.customerId || ""))).size,
-          customers: row.customers.sort(
-            (left, right) => new Date(right.purchaseDate) - new Date(left.purchaseDate),
+      const customerRows = customers.map((customer) => {
+        const customerVouchers = vouchers.filter(
+          (voucher) =>
+            String(voucher.customerId || "") === String(customer._id),
+        );
+        const spent = normalizeMoney(
+          customerVouchers.reduce(
+            (sum, voucher) => sum + Number(voucher.posMeta?.totalAmount || 0),
+            0,
           ),
-        }))
-        .sort((left, right) => left.itemName.localeCompare(right.itemName)),
-    );
-  } catch (err) {
-    console.error("Error loading product-wise customer report:", err);
-    res.status(500).json({ message: "Error loading product-wise customer report" });
-  }
-});
-
-app.get("/companies/:companyId/reports/customer-behaviour/stock-group-wise", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const vouchers = await Vouchers.find({
-      companyId,
-      voucherName: { $regex: "^POS Voucher$", $options: "i" },
-    }).sort({ date: -1 }).toArray();
-
-    const groupMap = new Map();
-    vouchers.forEach((voucher) => {
-      (voucher.inventoryLines || []).forEach((line) => {
-        const key = line.groupName || "Ungrouped";
-        if (!groupMap.has(key)) {
-          groupMap.set(key, {
-            groupName: key,
-            totalQty: 0,
-            totalAmount: 0,
-            customers: new Map(),
-            lastPurchaseAt: null,
-          });
-        }
-        const current = groupMap.get(key);
-        current.totalQty = normalizeMoney(current.totalQty + Number(line.qty || 0));
-        current.totalAmount = normalizeMoney(current.totalAmount + Number(line.amount || 0));
-        const customerKey = voucher.customerSnapshot?.phone || String(voucher.customerId || "");
-        const customerExisting = current.customers.get(customerKey) || {
-          customerName: voucher.customerSnapshot?.name || "",
-          phone: voucher.customerSnapshot?.phone || "",
-          totalQty: 0,
-          totalAmount: 0,
-          lastPurchaseAt: null,
+        );
+        return {
+          customerId: customer._id,
+          name: customer.name,
+          phone: customer.phone,
+          address: customer.address || "",
+          rewardPoints: normalizeMoney(customer.rewardPoints || 0),
+          totalOrders: customerVouchers.length,
+          totalSpent: spent,
+          averageOrderValue: customerVouchers.length
+            ? normalizeMoney(spent / customerVouchers.length)
+            : 0,
+          lastPurchaseAt:
+            customerVouchers[0]?.date || customer.lastPurchaseAt || null,
         };
-        customerExisting.totalQty = normalizeMoney(customerExisting.totalQty + Number(line.qty || 0));
-        customerExisting.totalAmount = normalizeMoney(customerExisting.totalAmount + Number(line.amount || 0));
-        customerExisting.lastPurchaseAt = voucher.date;
-        current.customers.set(customerKey, customerExisting);
-        current.lastPurchaseAt = voucher.date;
       });
-    });
 
-    res.json(
-      [...groupMap.values()]
-        .map((row) => ({
-          groupName: row.groupName,
-          totalQty: row.totalQty,
-          totalAmount: row.totalAmount,
-          uniqueCustomers: row.customers.size,
-          lastPurchaseAt: row.lastPurchaseAt,
-          customers: [...row.customers.values()].sort(
-            (left, right) => new Date(right.lastPurchaseAt) - new Date(left.lastPurchaseAt),
-          ),
-        }))
-        .sort((left, right) => left.groupName.localeCompare(right.groupName)),
-    );
-  } catch (err) {
-    console.error("Error loading stock group-wise customer report:", err);
-    res.status(500).json({ message: "Error loading stock group-wise customer report" });
-  }
-});
-
-app.get("/companies/:companyId/reports/customer-behaviour/category-wise", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const vouchers = await Vouchers.find({
-      companyId,
-      voucherName: { $regex: "^POS Voucher$", $options: "i" },
-    }).sort({ date: -1 }).toArray();
-
-    const categoryMap = new Map();
-    vouchers.forEach((voucher) => {
-      (voucher.inventoryLines || []).forEach((line) => {
-        const key = line.stockCategoryName || "Uncategorized";
-        if (!categoryMap.has(key)) {
-          categoryMap.set(key, {
-            categoryName: key,
-            totalQty: 0,
-            totalAmount: 0,
-            uniqueCustomers: new Set(),
-            purchases: [],
-          });
-        }
-        const current = categoryMap.get(key);
-        current.totalQty = normalizeMoney(current.totalQty + Number(line.qty || 0));
-        current.totalAmount = normalizeMoney(current.totalAmount + Number(line.amount || 0));
-        current.uniqueCustomers.add(voucher.customerSnapshot?.phone || String(voucher.customerId || ""));
-        current.purchases.push({
+      res.json({
+        summary: {
+          totalCustomers: customers.length,
+          activeCustomers: uniqueCustomerIds.size,
+          totalOrders: vouchers.length,
+          totalSales,
+          totalRewardsEarned,
+          totalRewardsRedeemed,
+        },
+        customers: customerRows,
+        recentVouchers: vouchers.slice(0, 20).map((voucher) => ({
+          voucherId: voucher._id,
+          date: voucher.date,
+          number: voucher.number,
           customerName: voucher.customerSnapshot?.name || "",
           phone: voucher.customerSnapshot?.phone || "",
-          itemName: line.itemName || "",
-          qty: Number(line.qty || 0),
-          amount: normalizeMoney(line.amount || 0),
-          purchaseDate: voucher.date,
+          totalAmount: normalizeMoney(voucher.posMeta?.totalAmount || 0),
+          rewardEarned: normalizeMoney(voucher.posMeta?.rewardEarned || 0),
+        })),
+      });
+    } catch (err) {
+      console.error("Error loading customer behaviour overview:", err);
+      res
+        .status(500)
+        .json({ message: "Error loading customer behaviour overview" });
+    }
+  },
+);
+
+app.get(
+  "/companies/:companyId/reports/customer-behaviour/product-wise",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const itemId =
+        req.query.itemId && ObjectId.isValid(req.query.itemId)
+          ? new ObjectId(req.query.itemId)
+          : null;
+      const vouchers = await Vouchers.find({
+        companyId,
+        voucherName: { $regex: "^POS Voucher$", $options: "i" },
+      })
+        .sort({ date: -1 })
+        .toArray();
+
+      const productMap = new Map();
+      vouchers.forEach((voucher) => {
+        (voucher.inventoryLines || []).forEach((line) => {
+          if (itemId && String(line.itemId) !== String(itemId)) return;
+          const key = String(line.itemId);
+          if (!productMap.has(key)) {
+            productMap.set(key, {
+              itemId: line.itemId,
+              itemName: line.itemName,
+              groupName: line.groupName || "",
+              stockCategoryName: line.stockCategoryName || "",
+              totalQty: 0,
+              totalAmount: 0,
+              customers: [],
+            });
+          }
+          const current = productMap.get(key);
+          current.totalQty = normalizeMoney(
+            current.totalQty + Number(line.qty || 0),
+          );
+          current.totalAmount = normalizeMoney(
+            current.totalAmount + Number(line.amount || 0),
+          );
+          current.customers.push({
+            customerId: voucher.customerId || null,
+            customerName: voucher.customerSnapshot?.name || "",
+            phone: voucher.customerSnapshot?.phone || "",
+            address: voucher.customerSnapshot?.address || "",
+            voucherId: voucher._id,
+            voucherNo: voucher.number || "",
+            purchaseDate: voucher.date,
+            qty: Number(line.qty || 0),
+            amount: normalizeMoney(line.amount || 0),
+          });
         });
       });
-    });
 
-    res.json(
-      [...categoryMap.values()]
-        .map((row) => ({
-          categoryName: row.categoryName,
-          totalQty: row.totalQty,
-          totalAmount: row.totalAmount,
-          uniqueCustomers: row.uniqueCustomers.size,
-          purchases: row.purchases.sort(
-            (left, right) => new Date(right.purchaseDate) - new Date(left.purchaseDate),
+      res.json(
+        [...productMap.values()]
+          .map((row) => ({
+            ...row,
+            uniqueCustomers: new Set(
+              row.customers.map(
+                (entry) => entry.phone || String(entry.customerId || ""),
+              ),
+            ).size,
+            customers: row.customers.sort(
+              (left, right) =>
+                new Date(right.purchaseDate) - new Date(left.purchaseDate),
+            ),
+          }))
+          .sort((left, right) => left.itemName.localeCompare(right.itemName)),
+      );
+    } catch (err) {
+      console.error("Error loading product-wise customer report:", err);
+      res
+        .status(500)
+        .json({ message: "Error loading product-wise customer report" });
+    }
+  },
+);
+
+app.get(
+  "/companies/:companyId/reports/customer-behaviour/stock-group-wise",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const vouchers = await Vouchers.find({
+        companyId,
+        voucherName: { $regex: "^POS Voucher$", $options: "i" },
+      })
+        .sort({ date: -1 })
+        .toArray();
+
+      const groupMap = new Map();
+      vouchers.forEach((voucher) => {
+        (voucher.inventoryLines || []).forEach((line) => {
+          const key = line.groupName || "Ungrouped";
+          if (!groupMap.has(key)) {
+            groupMap.set(key, {
+              groupName: key,
+              totalQty: 0,
+              totalAmount: 0,
+              customers: new Map(),
+              lastPurchaseAt: null,
+            });
+          }
+          const current = groupMap.get(key);
+          current.totalQty = normalizeMoney(
+            current.totalQty + Number(line.qty || 0),
+          );
+          current.totalAmount = normalizeMoney(
+            current.totalAmount + Number(line.amount || 0),
+          );
+          const customerKey =
+            voucher.customerSnapshot?.phone || String(voucher.customerId || "");
+          const customerExisting = current.customers.get(customerKey) || {
+            customerName: voucher.customerSnapshot?.name || "",
+            phone: voucher.customerSnapshot?.phone || "",
+            totalQty: 0,
+            totalAmount: 0,
+            lastPurchaseAt: null,
+          };
+          customerExisting.totalQty = normalizeMoney(
+            customerExisting.totalQty + Number(line.qty || 0),
+          );
+          customerExisting.totalAmount = normalizeMoney(
+            customerExisting.totalAmount + Number(line.amount || 0),
+          );
+          customerExisting.lastPurchaseAt = voucher.date;
+          current.customers.set(customerKey, customerExisting);
+          current.lastPurchaseAt = voucher.date;
+        });
+      });
+
+      res.json(
+        [...groupMap.values()]
+          .map((row) => ({
+            groupName: row.groupName,
+            totalQty: row.totalQty,
+            totalAmount: row.totalAmount,
+            uniqueCustomers: row.customers.size,
+            lastPurchaseAt: row.lastPurchaseAt,
+            customers: [...row.customers.values()].sort(
+              (left, right) =>
+                new Date(right.lastPurchaseAt) - new Date(left.lastPurchaseAt),
+            ),
+          }))
+          .sort((left, right) => left.groupName.localeCompare(right.groupName)),
+      );
+    } catch (err) {
+      console.error("Error loading stock group-wise customer report:", err);
+      res
+        .status(500)
+        .json({ message: "Error loading stock group-wise customer report" });
+    }
+  },
+);
+
+app.get(
+  "/companies/:companyId/reports/customer-behaviour/category-wise",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const vouchers = await Vouchers.find({
+        companyId,
+        voucherName: { $regex: "^POS Voucher$", $options: "i" },
+      })
+        .sort({ date: -1 })
+        .toArray();
+
+      const categoryMap = new Map();
+      vouchers.forEach((voucher) => {
+        (voucher.inventoryLines || []).forEach((line) => {
+          const key = line.stockCategoryName || "Uncategorized";
+          if (!categoryMap.has(key)) {
+            categoryMap.set(key, {
+              categoryName: key,
+              totalQty: 0,
+              totalAmount: 0,
+              uniqueCustomers: new Set(),
+              purchases: [],
+            });
+          }
+          const current = categoryMap.get(key);
+          current.totalQty = normalizeMoney(
+            current.totalQty + Number(line.qty || 0),
+          );
+          current.totalAmount = normalizeMoney(
+            current.totalAmount + Number(line.amount || 0),
+          );
+          current.uniqueCustomers.add(
+            voucher.customerSnapshot?.phone || String(voucher.customerId || ""),
+          );
+          current.purchases.push({
+            customerName: voucher.customerSnapshot?.name || "",
+            phone: voucher.customerSnapshot?.phone || "",
+            itemName: line.itemName || "",
+            qty: Number(line.qty || 0),
+            amount: normalizeMoney(line.amount || 0),
+            purchaseDate: voucher.date,
+          });
+        });
+      });
+
+      res.json(
+        [...categoryMap.values()]
+          .map((row) => ({
+            categoryName: row.categoryName,
+            totalQty: row.totalQty,
+            totalAmount: row.totalAmount,
+            uniqueCustomers: row.uniqueCustomers.size,
+            purchases: row.purchases.sort(
+              (left, right) =>
+                new Date(right.purchaseDate) - new Date(left.purchaseDate),
+            ),
+          }))
+          .sort((left, right) =>
+            left.categoryName.localeCompare(right.categoryName),
           ),
-        }))
-        .sort((left, right) => left.categoryName.localeCompare(right.categoryName)),
-    );
-  } catch (err) {
-    console.error("Error loading stock category-wise customer report:", err);
-    res.status(500).json({ message: "Error loading stock category-wise customer report" });
-  }
-});
+      );
+    } catch (err) {
+      console.error("Error loading stock category-wise customer report:", err);
+      res
+        .status(500)
+        .json({ message: "Error loading stock category-wise customer report" });
+    }
+  },
+);
 
 // List vouchers (basic)
 // GET vouchers for a company + voucher type
@@ -3142,6 +3779,7 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       date,
       narration,
       commercialMeta,
+      manufacturingMeta,
       lines,
       inventoryLines,
     } = req.body;
@@ -3167,25 +3805,7 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
     // Validate inventory lines
     const normalizedInventory = (inventoryLines || [])
       .filter((line) => line?.itemId)
-      .map((i) => ({
-        itemId: new ObjectId(i.itemId),
-        itemName: normalizeName(i.itemName || i.productSnapshot?.name || ""),
-        qty: Number(i.qty) || 0,
-        rate: Number(i.rate) || 0,
-        amount: Number(i.amount) || Number(i.qty) * Number(i.rate),
-        billedQty: Number(i.billedQty) || Number(i.qty),
-        discount: Number(i.discount) || 0,
-        godownId:
-          i.godownId && ObjectId.isValid(i.godownId)
-            ? new ObjectId(i.godownId)
-            : null,
-        godownName: normalizeName(i.godownName),
-        toGodownId:
-          i.toGodownId && ObjectId.isValid(i.toGodownId)
-            ? new ObjectId(i.toGodownId)
-            : null,
-        toGodownName: normalizeName(i.toGodownName),
-      }));
+      .map(normalizeInventoryLinePayload);
 
     let totalDr = 0;
     let totalCr = 0;
@@ -3238,6 +3858,10 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       };
     }
 
+    if (manufacturingMeta) {
+      doc.manufacturingMeta = normalizeManufacturingMeta(manufacturingMeta);
+    }
+
     const result = await Vouchers.insertOne(doc);
     res.status(201).json({ _id: result.insertedId, ...doc });
   } catch (err) {
@@ -3251,7 +3875,10 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const voucherId = new ObjectId(req.params.voucherId);
-    const existingVoucher = await Vouchers.findOne({ _id: voucherId, companyId });
+    const existingVoucher = await Vouchers.findOne({
+      _id: voucherId,
+      companyId,
+    });
     if (!existingVoucher) {
       return res.status(404).json({ message: "Voucher not found" });
     }
@@ -3266,6 +3893,7 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
       customerSnapshot,
       commercialMeta,
       posMeta,
+      manufacturingMeta,
       lines,
       inventoryLines,
     } = req.body;
@@ -3285,7 +3913,8 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
     if (date) update.$set.date = new Date(date);
     if (narration !== undefined) update.$set.narration = narration;
     if (referenceNo !== undefined) update.$set.referenceNo = referenceNo;
-    if (customerId && ObjectId.isValid(customerId)) update.$set.customerId = new ObjectId(customerId);
+    if (customerId && ObjectId.isValid(customerId))
+      update.$set.customerId = new ObjectId(customerId);
     if (customerSnapshot) {
       update.$set.customerSnapshot = {
         name: normalizeName(customerSnapshot.name || ""),
@@ -3321,6 +3950,10 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
         changeAmount: normalizeMoney(posMeta.changeAmount || 0),
       };
     }
+    if (manufacturingMeta) {
+      update.$set.manufacturingMeta =
+        normalizeManufacturingMeta(manufacturingMeta);
+    }
 
     if (Array.isArray(lines)) {
       const validLines = lines.filter((line) => line?.ledgerId);
@@ -3352,44 +3985,7 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
     if (Array.isArray(inventoryLines)) {
       update.$set.inventoryLines = inventoryLines
         .filter((line) => line?.itemId)
-        .map((line) => ({
-          itemId: new ObjectId(line.itemId),
-          itemName: normalizeName(
-            line.itemName || line.productSnapshot?.name || "",
-          ),
-          qty: Number(line.qty) || 0,
-          rate: Number(line.rate) || 0,
-          amount:
-            Number(line.amount) ||
-            (Number(line.qty) || 0) * (Number(line.rate) || 0),
-          billedQty: Number(line.billedQty) || Number(line.qty) || 0,
-          discount: Number(line.discount) || 0,
-          mrpRate: Number(line.mrpRate) || Number(line.rate) || 0,
-          discountType: line.discountType || "fixed",
-          discountValue: Number(line.discountValue) || 0,
-          groupId:
-            line.groupId && ObjectId.isValid(line.groupId)
-              ? new ObjectId(line.groupId)
-              : null,
-          groupName: normalizeName(line.groupName),
-          stockCategoryId:
-            line.stockCategoryId && ObjectId.isValid(line.stockCategoryId)
-              ? new ObjectId(line.stockCategoryId)
-              : null,
-          stockCategoryName: normalizeName(line.stockCategoryName),
-          alias: normalizeName(line.alias),
-          barcode: normalizeName(line.barcode),
-          godownId:
-            line.godownId && ObjectId.isValid(line.godownId)
-              ? new ObjectId(line.godownId)
-              : null,
-          godownName: normalizeName(line.godownName),
-          toGodownId:
-            line.toGodownId && ObjectId.isValid(line.toGodownId)
-              ? new ObjectId(line.toGodownId)
-              : null,
-          toGodownName: normalizeName(line.toGodownName),
-        }));
+        .map(normalizeInventoryLinePayload);
     }
 
     await Vouchers.updateOne({ _id: voucherId, companyId }, update);
@@ -3398,9 +3994,15 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
       nameKey(existingVoucher.voucherName || "") === "pos voucher" ||
       nameKey(updated?.voucherName || "") === "pos voucher"
     ) {
-      await rebuildPosCustomerFromVouchers(companyId, existingVoucher.customerSnapshot?.phone);
+      await rebuildPosCustomerFromVouchers(
+        companyId,
+        existingVoucher.customerSnapshot?.phone,
+      );
       const nextPhone = updated?.customerSnapshot?.phone;
-      if (normalizePhone(nextPhone) !== normalizePhone(existingVoucher.customerSnapshot?.phone)) {
+      if (
+        normalizePhone(nextPhone) !==
+        normalizePhone(existingVoucher.customerSnapshot?.phone)
+      ) {
         await rebuildPosCustomerFromVouchers(companyId, nextPhone);
       }
     }
@@ -3442,7 +4044,9 @@ app.get("/companies/:companyId/vouchers/next-number", async (req, res) => {
       Vouchers.find({
         companyId,
         voucherTypeId: voucherTypeObjectId,
-      }).project({ number: 1 }).toArray(),
+      })
+        .project({ number: 1 })
+        .toArray(),
     ]);
 
     if (!company) {
@@ -3453,13 +4057,16 @@ app.get("/companies/:companyId/vouchers/next-number", async (req, res) => {
     }
 
     const companySlug = slugifySegment(company.name || "company") || "company";
-    const voucherSlug = slugifySegment(voucherType.name || "voucher") || "voucher";
+    const voucherSlug =
+      slugifySegment(voucherType.name || "voucher") || "voucher";
     const prefix = `${companySlug}-${voucherSlug}-`;
 
     let maxSequence = 0;
     for (const voucher of vouchers) {
       const numberText = normalizeTextBlock(voucher.number);
-      const match = numberText.match(new RegExp(`^${escapeRegex(prefix)}(\\d+)$`, "i"));
+      const match = numberText.match(
+        new RegExp(`^${escapeRegex(prefix)}(\\d+)$`, "i"),
+      );
       if (match) {
         maxSequence = Math.max(maxSequence, Number(match[1] || 0));
         continue;
@@ -3527,9 +4134,12 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
       return res.status(404).json({ message: "Ledger not found." });
     }
 
-    const ledgerMap = new Map(ledgers.map((row) => [String(row._id), row.name]));
+    const ledgerMap = new Map(
+      ledgers.map((row) => [String(row._id), row.name]),
+    );
     const fixedOpening =
-      (ledger.openingDrCr === "DR" ? 1 : -1) * (Number(ledger.openingBalance) || 0);
+      (ledger.openingDrCr === "DR" ? 1 : -1) *
+      (Number(ledger.openingBalance) || 0);
 
     let movementBeforeFrom = 0;
     let periodDebit = 0;
@@ -3573,7 +4183,10 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
                   otherIndex !== lineIndex &&
                   String(otherLine.ledgerId) !== String(ledgerId),
               )
-              .map((otherLine) => ledgerMap.get(String(otherLine.ledgerId)) || "Unknown")
+              .map(
+                (otherLine) =>
+                  ledgerMap.get(String(otherLine.ledgerId)) || "Unknown",
+              )
               .filter(Boolean)
               .join(", ");
 
@@ -3628,7 +4241,9 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
         debit: periodDebit,
         credit: periodCredit,
       },
-      closingBalance: normalizeMoney(openingBalance + periodDebit - periodCredit),
+      closingBalance: normalizeMoney(
+        openingBalance + periodDebit - periodCredit,
+      ),
       entries: entriesWithRunning,
     });
   } catch (err) {
@@ -3878,6 +4493,7 @@ app.post("/companies/:companyId/items", async (req, res) => {
       unitId,
       unitOfMeasure,
       godownId,
+      inventoryRole,
       description,
       notes,
       picture,
@@ -3949,6 +4565,7 @@ app.post("/companies/:companyId/items", async (req, res) => {
       godownId:
         godownId && ObjectId.isValid(godownId) ? new ObjectId(godownId) : null,
       godownName: normalizeName(resolvedGodown),
+      inventoryRole: inventoryRoleKey(inventoryRole),
       description: normalizeName(description),
       notes: normalizeName(notes),
       picture: picture || "",
@@ -3984,6 +4601,7 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
       unitId,
       unitOfMeasure,
       godownId,
+      inventoryRole,
       description,
       notes,
       picture,
@@ -4059,6 +4677,7 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
             ? new ObjectId(godownId)
             : null,
         godownName: normalizeName(resolvedGodown),
+        inventoryRole: inventoryRoleKey(inventoryRole),
         description: normalizeName(description),
         notes: normalizeName(notes),
         picture: picture || "",
@@ -4448,13 +5067,247 @@ app.get(
   },
 );
 
+app.get("/companies/:companyId/manufacturing/reference", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await ensureCompanyCoreMasters(companyId);
+
+    const [items, units, voucherTypes, rawMaterialSummary] = await Promise.all([
+      Items.find({ companyId }).sort({ name: 1 }).toArray(),
+      Units.find({ companyId }).sort({ name: 1 }).toArray(),
+      VoucherTypes.find({ companyId }).toArray(),
+      buildStockSummary(companyId, null, null, {
+        includeRoles: ["raw_material"],
+      }),
+    ]);
+
+    const manufacturingVoucherType = voucherTypes.find(
+      (row) => nameKey(row.name) === "manufacturing",
+    );
+
+    const rawSummaryMap = new Map(
+      (rawMaterialSummary.rows || []).map((row) => [String(row.itemId), row]),
+    );
+    const rawMaterials = items
+      .filter((item) => inventoryRoleKey(item.inventoryRole) === "raw_material")
+      .map((item) => ({
+        ...item,
+        availableQty: normalizeMoney(
+          rawSummaryMap.get(String(item._id))?.closingQty || 0,
+        ),
+        currentRate: normalizeMoney(
+          rawSummaryMap.get(String(item._id))?.closingRate || 0,
+        ),
+        currentValue: normalizeMoney(
+          rawSummaryMap.get(String(item._id))?.closingValue || 0,
+        ),
+      }));
+
+    res.json({
+      voucherTypeId: manufacturingVoucherType?._id || null,
+      items,
+      rawMaterials,
+      finishedGoods: items.filter(
+        (item) => inventoryRoleKey(item.inventoryRole) !== "raw_material",
+      ),
+      units,
+    });
+  } catch (err) {
+    console.error("Error loading manufacturing reference data:", err);
+    res
+      .status(500)
+      .json({ message: "Unable to load manufacturing reference data" });
+  }
+});
+
+app.get("/companies/:companyId/manufacturing/boms", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const rawMaterialSummary = await buildStockSummary(companyId, null, null, {
+      includeRoles: ["raw_material"],
+    });
+    const rows = await Boms.find({ companyId })
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .toArray();
+    const enriched = await Promise.all(
+      rows.map((row) =>
+        enrichBomWithAvailability(companyId, row, rawMaterialSummary),
+      ),
+    );
+    res.json(enriched);
+  } catch (err) {
+    console.error("Error loading BOM list:", err);
+    res.status(500).json({ message: "Unable to load BOM list" });
+  }
+});
+
+app.post("/companies/:companyId/manufacturing/boms", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const {
+      name,
+      finishedItemId,
+      finishedItemName,
+      outputQty,
+      unitId,
+      unitName,
+      description,
+      status = "active",
+      notes,
+      components = [],
+      additionalCosts = [],
+    } = req.body || {};
+
+    if (!finishedItemId || !ObjectId.isValid(finishedItemId)) {
+      return res.status(400).json({ message: "Finished item is required." });
+    }
+
+    const finishedItem = await Items.findOne({
+      _id: new ObjectId(finishedItemId),
+      companyId,
+    });
+    if (!finishedItem) {
+      return res.status(400).json({ message: "Finished item not found." });
+    }
+
+    const normalizedComponents = components
+      .map(normalizeBomComponentPayload)
+      .filter((row) => row.itemId && Number(row.qty || 0) > 0);
+    if (normalizedComponents.length === 0) {
+      return res
+        .status(400)
+        .json({ message: "At least one component is required." });
+    }
+
+    const doc = {
+      companyId,
+      name: normalizeName(
+        name || finishedItemName || finishedItem.name || "Manufacturing BoM",
+      ),
+      finishedItemId: new ObjectId(finishedItemId),
+      finishedItemName: normalizeName(
+        finishedItemName || finishedItem.name || "",
+      ),
+      outputQty: normalizeMoney(outputQty || 1),
+      unitId: unitId && ObjectId.isValid(unitId) ? new ObjectId(unitId) : null,
+      unitName: normalizeName(unitName || finishedItem.unitOfMeasure || ""),
+      description: normalizeTextBlock(description || ""),
+      status: nameKey(status) === "inactive" ? "inactive" : "active",
+      notes: normalizeTextBlock(notes || ""),
+      components: normalizedComponents,
+      additionalCosts: (additionalCosts || [])
+        .map(normalizeAdditionalCostPayload)
+        .filter((row) => Number(row.amount || 0) > 0),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await Boms.insertOne(doc);
+    res.status(201).json({ _id: result.insertedId, ...doc });
+  } catch (err) {
+    console.error("Error creating BOM:", err);
+    res.status(500).json({ message: "Unable to create BOM" });
+  }
+});
+
+app.put("/companies/:companyId/manufacturing/boms/:bomId", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const bomId = new ObjectId(req.params.bomId);
+    const existing = await Boms.findOne({ _id: bomId, companyId });
+    if (!existing) {
+      return res.status(404).json({ message: "BOM not found." });
+    }
+
+    const {
+      name,
+      finishedItemId,
+      finishedItemName,
+      outputQty,
+      unitId,
+      unitName,
+      description,
+      status = "active",
+      notes,
+      components = [],
+      additionalCosts = [],
+    } = req.body || {};
+
+    const normalizedComponents = components
+      .map(normalizeBomComponentPayload)
+      .filter((row) => row.itemId && Number(row.qty || 0) > 0);
+
+    const update = {
+      $set: {
+        name: normalizeName(name || existing.name || "Manufacturing BoM"),
+        finishedItemId:
+          finishedItemId && ObjectId.isValid(finishedItemId)
+            ? new ObjectId(finishedItemId)
+            : existing.finishedItemId,
+        finishedItemName: normalizeName(
+          finishedItemName || existing.finishedItemName || "",
+        ),
+        outputQty: normalizeMoney(outputQty || existing.outputQty || 1),
+        unitId:
+          unitId && ObjectId.isValid(unitId)
+            ? new ObjectId(unitId)
+            : existing.unitId || null,
+        unitName: normalizeName(unitName || existing.unitName || ""),
+        description: normalizeTextBlock(description || ""),
+        status: nameKey(status) === "inactive" ? "inactive" : "active",
+        notes: normalizeTextBlock(notes || ""),
+        components:
+          normalizedComponents.length > 0
+            ? normalizedComponents
+            : existing.components || [],
+        additionalCosts: (additionalCosts || [])
+          .map(normalizeAdditionalCostPayload)
+          .filter((row) => Number(row.amount || 0) > 0),
+        updatedAt: new Date(),
+      },
+    };
+
+    await Boms.updateOne({ _id: bomId, companyId }, update);
+    res.json(await Boms.findOne({ _id: bomId, companyId }));
+  } catch (err) {
+    console.error("Error updating BOM:", err);
+    res.status(500).json({ message: "Unable to update BOM" });
+  }
+});
+
+app.delete(
+  "/companies/:companyId/manufacturing/boms/:bomId",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const bomId = new ObjectId(req.params.bomId);
+      const used = await Vouchers.countDocuments({
+        companyId,
+        "manufacturingMeta.bomId": bomId,
+      });
+      if (used > 0) {
+        return res
+          .status(400)
+          .json({ message: "BOM is used in production. Cannot delete." });
+      }
+      await Boms.deleteOne({ _id: bomId, companyId });
+      res.json({ message: "BOM deleted" });
+    } catch (err) {
+      console.error("Error deleting BOM:", err);
+      res.status(500).json({ message: "Unable to delete BOM" });
+    }
+  },
+);
+
 app.get("/companies/:companyId/reports/stock-summary", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await ensureCompanyCoreMasters(companyId);
     const fromDate = safeDate(req.query.from);
     const toDate = safeDate(req.query.to);
-    const summary = await buildStockSummary(companyId, fromDate, toDate);
+    const summary = await buildStockSummary(companyId, fromDate, toDate, {
+      excludeRoles: ["raw_material"],
+    });
     res.json(summary);
   } catch (err) {
     console.error("Error building stock summary:", err);
@@ -4462,56 +5315,133 @@ app.get("/companies/:companyId/reports/stock-summary", async (req, res) => {
   }
 });
 
-app.get("/companies/:companyId/reports/stock-group-summary", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
-    const fromDate = safeDate(req.query.from);
-    const toDate = safeDate(req.query.to);
-    const summary = await buildStockGroupSummary(companyId, fromDate, toDate);
-    res.json(summary);
-  } catch (err) {
-    console.error("Error building stock group summary:", err);
-    res.status(500).json({ message: "Error building stock group summary" });
-  }
-});
+app.get(
+  "/companies/:companyId/reports/stock-group-summary",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await ensureCompanyCoreMasters(companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      const summary = await buildStockGroupSummary(
+        companyId,
+        fromDate,
+        toDate,
+        {
+          excludeRoles: ["raw_material"],
+        },
+      );
+      res.json(summary);
+    } catch (err) {
+      console.error("Error building stock group summary:", err);
+      res.status(500).json({ message: "Error building stock group summary" });
+    }
+  },
+);
 
-app.get("/companies/:companyId/reports/stock-item-detailed", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
-    const fromDate = safeDate(req.query.from);
-    const toDate = safeDate(req.query.to);
-    const summary = await buildInventoryDetailReport(companyId, fromDate, toDate);
-    res.json(summary);
-  } catch (err) {
-    console.error("Error building detailed stock item report:", err);
-    res.status(500).json({ message: "Error building detailed stock item report" });
-  }
-});
+app.get(
+  "/companies/:companyId/reports/stock-item-detailed",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await ensureCompanyCoreMasters(companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      const summary = await buildInventoryDetailReport(
+        companyId,
+        fromDate,
+        toDate,
+        {
+          excludeRoles: ["raw_material"],
+        },
+      );
+      res.json(summary);
+    } catch (err) {
+      console.error("Error building detailed stock item report:", err);
+      res
+        .status(500)
+        .json({ message: "Error building detailed stock item report" });
+    }
+  },
+);
 
-app.get("/companies/:companyId/reports/inventory-movement-analysis", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
-    const fromDate = safeDate(req.query.from);
-    const toDate = safeDate(req.query.to);
-    const dimension = normalizeName(req.query.dimension || "stock-group")
-      .toLowerCase()
-      .replace(/\s+/g, "-");
-    const report = await buildInventoryMovementDimensionReport(
-      companyId,
-      fromDate,
-      toDate,
-      dimension,
-    );
+app.get(
+  "/companies/:companyId/reports/raw-material-summary",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await ensureCompanyCoreMasters(companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      res.json(
+        await buildManufacturingRawMaterialSummary(companyId, fromDate, toDate),
+      );
+    } catch (err) {
+      console.error("Error building raw material summary:", err);
+      res.status(500).json({ message: "Error building raw material summary" });
+    }
+  },
+);
 
-    res.json(report);
-  } catch (err) {
-    console.error("Error building inventory movement analysis:", err);
-    res.status(500).json({ message: "Error building inventory movement analysis" });
-  }
-});
+app.get(
+  "/companies/:companyId/reports/manufacturing/production-register",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      res.json(await buildProductionRegister(companyId, fromDate, toDate));
+    } catch (err) {
+      console.error("Error building production register:", err);
+      res.status(500).json({ message: "Error building production register" });
+    }
+  },
+);
+
+app.get(
+  "/companies/:companyId/reports/manufacturing/component-consumption",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      res.json(
+        await buildComponentConsumptionReport(companyId, fromDate, toDate),
+      );
+    } catch (err) {
+      console.error("Error building component consumption:", err);
+      res.status(500).json({ message: "Error building component consumption" });
+    }
+  },
+);
+
+app.get(
+  "/companies/:companyId/reports/inventory-movement-analysis",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await ensureCompanyCoreMasters(companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      const dimension = normalizeName(req.query.dimension || "stock-group")
+        .toLowerCase()
+        .replace(/\s+/g, "-");
+      const report = await buildInventoryMovementDimensionReport(
+        companyId,
+        fromDate,
+        toDate,
+        dimension,
+      );
+
+      res.json(report);
+    } catch (err) {
+      console.error("Error building inventory movement analysis:", err);
+      res
+        .status(500)
+        .json({ message: "Error building inventory movement analysis" });
+    }
+  },
+);
 
 app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
   try {
@@ -4598,9 +5528,9 @@ app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
     periodVouchers.forEach((voucher) => {
       const name = nameKey(voucher.voucherName || "");
       const amount = voucherTotalAmount(voucher);
-        if (name === "sales" || name === "pos voucher") {
-          voucherTotals.sales = normalizeMoney(voucherTotals.sales + amount);
-        } else if (name === "credit note") {
+      if (name === "sales" || name === "pos voucher") {
+        voucherTotals.sales = normalizeMoney(voucherTotals.sales + amount);
+      } else if (name === "credit note") {
         voucherTotals.salesReturns = normalizeMoney(
           voucherTotals.salesReturns + amount,
         );
@@ -4712,7 +5642,12 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
       buildStockSummary(companyId, fromDate, toDate),
     ]);
 
-    const balances = summarizeLedgerBalances(ledgers, vouchers, fromDate, toDate);
+    const balances = summarizeLedgerBalances(
+      ledgers,
+      vouchers,
+      fromDate,
+      toDate,
+    );
     const groupMap = new Map(groups.map((group) => [String(group._id), group]));
 
     const assets = new Map();
@@ -4769,7 +5704,10 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
       }
     });
 
-    if (stockSummary?.totals?.openingValue || stockSummary?.totals?.closingValue) {
+    if (
+      stockSummary?.totals?.openingValue ||
+      stockSummary?.totals?.closingValue
+    ) {
       const current = assets.get("Closing Stock") || {
         groupName: "Closing Stock",
         openingAmount: 0,
@@ -4949,11 +5887,19 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
     });
 
     const currentAssets = balances
-      .filter((row) => nameKey(row.group?.parentId ? "" : row.group?.name || "") === "current assets")
+      .filter(
+        (row) =>
+          nameKey(row.group?.parentId ? "" : row.group?.name || "") ===
+          "current assets",
+      )
       .reduce((sum, row) => normalizeMoney(sum + row.closingDebit), 0);
 
     const currentLiabilities = balances
-      .filter((row) => nameKey(row.group?.parentId ? "" : row.group?.name || "") === "current liabilities")
+      .filter(
+        (row) =>
+          nameKey(row.group?.parentId ? "" : row.group?.name || "") ===
+          "current liabilities",
+      )
       .reduce((sum, row) => normalizeMoney(sum + row.closingCredit), 0);
 
     const cashInHandTotal = balances
@@ -4975,10 +5921,14 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
       .slice(0, 5);
 
     const averageInventory = normalizeMoney(
-      ((Number(stockSummary.totals.openingValue || 0) + Number(stockSummary.totals.closingValue || 0)) / 2) || 0,
+      (Number(stockSummary.totals.openingValue || 0) +
+        Number(stockSummary.totals.closingValue || 0)) /
+        2 || 0,
     );
     const inventoryTurnover = averageInventory
-      ? normalizeMoney(Number(stockSummary.totals.outwardValue || 0) / averageInventory)
+      ? normalizeMoney(
+          Number(stockSummary.totals.outwardValue || 0) / averageInventory,
+        )
       : 0;
     const receivableTurnoverDays = salesTotal
       ? normalizeMoney((receivables / salesTotal) * 365)
@@ -5469,7 +6419,9 @@ async function resolveDefaultPosLedgers(companyId) {
     cashLedger:
       ledgers.find((ledger) => nameKey(ledger.name) === "cash") || null,
     bankLedger:
-      ledgers.find((ledger) => nameKey(ledger.group?.name || "") === "bank accounts") || null,
+      ledgers.find(
+        (ledger) => nameKey(ledger.group?.name || "") === "bank accounts",
+      ) || null,
   };
 }
 
@@ -5477,7 +6429,9 @@ async function upsertPosCustomer(companyId, customerInput, purchaseSummary) {
   const phone = normalizePhone(customerInput?.phone);
   if (!phone) throw new Error("Customer phone number is required");
 
-  const normalizedName = normalizeName(customerInput?.name || "Walk-in Customer");
+  const normalizedName = normalizeName(
+    customerInput?.name || "Walk-in Customer",
+  );
   const normalizedAddress = normalizeName(customerInput?.address || "");
   const rewardEarned = normalizeMoney(purchaseSummary.rewardEarned);
   const rewardRedeemed = normalizeMoney(purchaseSummary.rewardRedeemed);
@@ -5551,19 +6505,32 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
   const firstVoucher = vouchers[0];
   const latestVoucher = vouchers[vouchers.length - 1];
   const totalSpent = normalizeMoney(
-    vouchers.reduce((sum, voucher) => sum + Number(voucher.posMeta?.totalAmount || 0), 0),
+    vouchers.reduce(
+      (sum, voucher) => sum + Number(voucher.posMeta?.totalAmount || 0),
+      0,
+    ),
   );
   const lifetimeRewardEarned = normalizeMoney(
-    vouchers.reduce((sum, voucher) => sum + Number(voucher.posMeta?.rewardEarned || 0), 0),
+    vouchers.reduce(
+      (sum, voucher) => sum + Number(voucher.posMeta?.rewardEarned || 0),
+      0,
+    ),
   );
   const lifetimeRewardRedeemed = normalizeMoney(
-    vouchers.reduce((sum, voucher) => sum + Number(voucher.posMeta?.rewardRedeemed || 0), 0),
+    vouchers.reduce(
+      (sum, voucher) => sum + Number(voucher.posMeta?.rewardRedeemed || 0),
+      0,
+    ),
   );
-  const rewardPoints = normalizeMoney(lifetimeRewardEarned - lifetimeRewardRedeemed);
+  const rewardPoints = normalizeMoney(
+    lifetimeRewardEarned - lifetimeRewardRedeemed,
+  );
 
   const doc = {
     companyId,
-    name: normalizeName(latestVoucher.customerSnapshot?.name || "Walk-in Customer"),
+    name: normalizeName(
+      latestVoucher.customerSnapshot?.name || "Walk-in Customer",
+    ),
     phone,
     address: normalizeName(latestVoucher.customerSnapshot?.address || ""),
     rewardPoints,
@@ -5580,7 +6547,10 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
   if (existing) {
     await Customers.updateOne(
       { _id: existing._id, companyId },
-      { $set: doc, $setOnInsert: { createdAt: existing.createdAt || new Date() } },
+      {
+        $set: doc,
+        $setOnInsert: { createdAt: existing.createdAt || new Date() },
+      },
     );
     return Customers.findOne({ _id: existing._id, companyId });
   }
@@ -5617,14 +6587,25 @@ app.post("/companies/:companyId/cost-categories", async (req, res) => {
 app.put("/companies/:companyId/cost-categories/:id", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
-    await updateNamedMaster(CostCategories, companyId, req.params.id, req.body, {
-      duplicateMessage: "Cost category already exists",
-      mapPayload: (payload) => ({
-        alias: normalizeTextBlock(payload.alias),
-        description: normalizeTextBlock(payload.description),
+    await updateNamedMaster(
+      CostCategories,
+      companyId,
+      req.params.id,
+      req.body,
+      {
+        duplicateMessage: "Cost category already exists",
+        mapPayload: (payload) => ({
+          alias: normalizeTextBlock(payload.alias),
+          description: normalizeTextBlock(payload.description),
+        }),
+      },
+    );
+    res.json(
+      await CostCategories.findOne({
+        _id: new ObjectId(req.params.id),
+        companyId,
       }),
-    });
-    res.json(await CostCategories.findOne({ _id: new ObjectId(req.params.id), companyId }));
+    );
   } catch (err) {
     res.status(400).json({ message: err.message });
   }
@@ -5671,7 +6652,12 @@ app.put("/companies/:companyId/cost-centres/:id", async (req, res) => {
         description: normalizeTextBlock(payload.description),
       }),
     });
-    res.json(await CostCentres.findOne({ _id: new ObjectId(req.params.id), companyId }));
+    res.json(
+      await CostCentres.findOne({
+        _id: new ObjectId(req.params.id),
+        companyId,
+      }),
+    );
   } catch (err) {
     res.status(400).json({ message: err.message });
   }
@@ -5887,7 +6873,9 @@ app.get("/companies/:companyId/currencies", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
   const company = await Companies.findOne({ _id: companyId });
   await ensureCompanyBaseCurrency(company);
-  const rows = await Currencies.find({ companyId }).sort({ isBase: -1, code: 1 }).toArray();
+  const rows = await Currencies.find({ companyId })
+    .sort({ isBase: -1, code: 1 })
+    .toArray();
   res.json(rows);
 });
 
@@ -5899,7 +6887,9 @@ app.post("/companies/:companyId/currencies", async (req, res) => {
     const name = normalizeName(req.body.name);
     const decimalPlaces = Number(req.body.decimalPlaces || 2);
     if (!code || !name) {
-      return res.status(400).json({ message: "Currency code and name are required" });
+      return res
+        .status(400)
+        .json({ message: "Currency code and name are required" });
     }
 
     const duplicate = await Currencies.findOne({
@@ -5931,9 +6921,12 @@ app.put("/companies/:companyId/currencies/:id", async (req, res) => {
     const companyId = new ObjectId(req.params.companyId);
     const id = new ObjectId(req.params.id);
     const existing = await Currencies.findOne({ _id: id, companyId });
-    if (!existing) return res.status(404).json({ message: "Currency not found" });
+    if (!existing)
+      return res.status(404).json({ message: "Currency not found" });
     if (existing.isSystem) {
-      return res.status(400).json({ message: "Base currency cannot be altered here" });
+      return res
+        .status(400)
+        .json({ message: "Base currency cannot be altered here" });
     }
 
     const code = normalizeName(req.body.code);
@@ -5955,9 +6948,12 @@ app.delete("/companies/:companyId/currencies/:id", async (req, res) => {
     const companyId = new ObjectId(req.params.companyId);
     const id = new ObjectId(req.params.id);
     const existing = await Currencies.findOne({ _id: id, companyId });
-    if (!existing) return res.status(404).json({ message: "Currency not found" });
+    if (!existing)
+      return res.status(404).json({ message: "Currency not found" });
     if (existing.isBase || existing.isSystem) {
-      return res.status(400).json({ message: "Base currency cannot be deleted" });
+      return res
+        .status(400)
+        .json({ message: "Base currency cannot be deleted" });
     }
     await Currencies.deleteOne({ _id: id, companyId });
     res.json({ message: "Currency deleted" });
@@ -6032,7 +7028,8 @@ app.post("/companies/:companyId/employees", async (req, res) => {
 
     if (duplicate) {
       return res.status(400).json({
-        message: "Employee with the same name or employee number already exists",
+        message:
+          "Employee with the same name or employee number already exists",
       });
     }
 
@@ -6045,7 +7042,9 @@ app.post("/companies/:companyId/employees", async (req, res) => {
     const result = await Employees.insertOne(finalDoc);
     res.status(201).json({ _id: result.insertedId, ...finalDoc });
   } catch (err) {
-    res.status(500).json({ message: err.message || "Unable to create employee" });
+    res
+      .status(500)
+      .json({ message: err.message || "Unable to create employee" });
   }
 });
 
@@ -6054,7 +7053,8 @@ app.put("/companies/:companyId/employees/:id", async (req, res) => {
     const companyId = new ObjectId(req.params.companyId);
     const id = new ObjectId(req.params.id);
     const existing = await Employees.findOne({ _id: id, companyId });
-    if (!existing) return res.status(404).json({ message: "Employee not found" });
+    if (!existing)
+      return res.status(404).json({ message: "Employee not found" });
 
     const doc = normalizeEmployeePayload(req.body, {
       employeeNumber: existing.employeeNumber,
@@ -6080,18 +7080,18 @@ app.put("/companies/:companyId/employees/:id", async (req, res) => {
 
     if (duplicate) {
       return res.status(400).json({
-        message: "Employee with the same name or employee number already exists",
+        message:
+          "Employee with the same name or employee number already exists",
       });
     }
 
-    await Employees.updateOne(
-      { _id: id, companyId },
-      { $set: doc },
-    );
+    await Employees.updateOne({ _id: id, companyId }, { $set: doc });
 
     res.json(await Employees.findOne({ _id: id, companyId }));
   } catch (err) {
-    res.status(500).json({ message: err.message || "Unable to update employee" });
+    res
+      .status(500)
+      .json({ message: err.message || "Unable to update employee" });
   }
 });
 
