@@ -3144,6 +3144,61 @@ app.get("/companies/:companyId/customers", async (req, res) => {
   }
 });
 
+app.get("/companies/:companyId/customers/purchase-history", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const phone = normalizePhone(req.query.phone || "");
+
+    if (!phone) {
+      return res.json({ customer: null, purchases: [] });
+    }
+
+    const [customer, vouchers] = await Promise.all([
+      Customers.findOne({ companyId, phone }),
+      Vouchers.find({
+        companyId,
+        voucherName: { $regex: "^POS Voucher$", $options: "i" },
+        "customerSnapshot.phone": phone,
+      })
+        .sort({ date: -1, createdAt: -1, _id: -1 })
+        .toArray(),
+    ]);
+
+    const purchases = [];
+    vouchers.forEach((voucher) => {
+      const purchaseDate = voucher.date
+        ? new Date(voucher.date).toISOString().slice(0, 10)
+        : "";
+      (voucher.inventoryLines || []).forEach((line) => {
+        purchases.push({
+          voucherId: voucher._id,
+          voucherNumber: voucher.number || "",
+          purchaseDate,
+          itemId: line.itemId || null,
+          itemName: line.itemName || "",
+          qty: normalizeMoney(line.qty || line.billedQty || 0),
+        });
+      });
+    });
+
+    return res.json({
+      customer: customer
+        ? {
+            _id: customer._id,
+            name: customer.name || "",
+            phone: customer.phone || "",
+            address: customer.address || "",
+            rewardPoints: normalizeMoney(customer.rewardPoints || 0),
+          }
+        : null,
+      purchases,
+    });
+  } catch (err) {
+    console.error("Error loading customer purchase history:", err);
+    return res.status(500).json({ message: "Error loading customer purchase history" });
+  }
+});
+
 app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
