@@ -3546,21 +3546,33 @@ app.get(
   },
 );
 
-app.get(
-  "/companies/:companyId/reports/customer-behaviour/product-wise",
-  async (req, res) => {
-    try {
-      const companyId = new ObjectId(req.params.companyId);
-      const itemId =
-        req.query.itemId && ObjectId.isValid(req.query.itemId)
-          ? new ObjectId(req.query.itemId)
-          : null;
-      const vouchers = await Vouchers.find({
-        companyId,
-        voucherName: { $regex: "^POS Voucher$", $options: "i" },
-      })
-        .sort({ date: -1 })
-        .toArray();
+  app.get(
+    "/companies/:companyId/reports/customer-behaviour/product-wise",
+    async (req, res) => {
+      try {
+        const companyId = new ObjectId(req.params.companyId);
+        const itemId =
+          req.query.itemId && ObjectId.isValid(req.query.itemId)
+            ? new ObjectId(req.query.itemId)
+            : null;
+        const fromDate = safeDate(req.query.from);
+        const toDate = safeDate(req.query.to);
+        const voucherFilter = {
+          companyId,
+          voucherName: { $regex: "^POS Voucher$", $options: "i" },
+        };
+        if (fromDate || toDate) {
+          voucherFilter.date = {};
+          if (fromDate) voucherFilter.date.$gte = fromDate;
+          if (toDate) {
+            const inclusiveTo = new Date(toDate);
+            inclusiveTo.setHours(23, 59, 59, 999);
+            voucherFilter.date.$lte = inclusiveTo;
+          }
+        }
+        const vouchers = await Vouchers.find(voucherFilter)
+          .sort({ date: -1 })
+          .toArray();
 
       const productMap = new Map();
       vouchers.forEach((voucher) => {
