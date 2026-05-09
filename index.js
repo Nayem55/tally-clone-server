@@ -219,7 +219,9 @@ function salesPersonKeyFromMeta(meta = {}) {
 
 function voucherMatchesSalesPerson(voucher = {}, salesPersonId = "") {
   if (!salesPersonId) return true;
-  return salesPersonKeyFromMeta(voucher.salesMeta || {}) === String(salesPersonId);
+  return (
+    salesPersonKeyFromMeta(voucher.salesMeta || {}) === String(salesPersonId)
+  );
 }
 
 function formatProductionNumber(companyName = "", currentCount = 0) {
@@ -1143,7 +1145,8 @@ async function buildInventoryDetailReport(
       return false;
     if (
       requestedCategory &&
-      normalizeName(item.stockCategory || "").toLowerCase() !== requestedCategory
+      normalizeName(item.stockCategory || "").toLowerCase() !==
+        requestedCategory
     ) {
       return false;
     }
@@ -1949,9 +1952,7 @@ async function buildSalesPersonDrillReport(
 
         const qty = normalizeMoney(Number(line.qty || 0));
         const rate = normalizeMoney(Number(line.rate || 0));
-        const value = normalizeMoney(
-          Number(line.amount || 0) || qty * rate,
-        );
+        const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
         totalQty = normalizeMoney(totalQty + qty);
         totalValue = normalizeMoney(totalValue + value);
 
@@ -1975,8 +1976,9 @@ async function buildSalesPersonDrillReport(
             normalizeName(line.itemName || item.name || "") || "Unnamed Item",
           groupId: String(item.groupId || ""),
           groupName:
-            normalizeName(groupById.get(String(item.groupId || ""))?.name || "") ||
-            "Ungrouped",
+            normalizeName(
+              groupById.get(String(item.groupId || ""))?.name || "",
+            ) || "Ungrouped",
           categoryName:
             normalizeName(item.stockCategory || "") || "Uncategorized",
           qty,
@@ -2089,9 +2091,7 @@ async function buildSalesPersonDrillReport(
           : state.metrics.lastSaleOn;
       state.metrics.averageRate =
         state.metrics.salesQty !== 0
-          ? normalizeMoney(
-              state.metrics.salesValue / state.metrics.salesQty,
-            )
+          ? normalizeMoney(state.metrics.salesValue / state.metrics.salesQty)
           : 0;
 
       accumulator.set(key, state);
@@ -2126,11 +2126,7 @@ async function buildPartyMovementDetailReport(
   companyId,
   fromDate = null,
   toDate = null,
-  {
-    level = "ledger",
-    groupName = "",
-    ledgerName = "",
-  } = {},
+  { level = "ledger", groupName = "", ledgerName = "" } = {},
 ) {
   const requestedGroupName = normalizeName(groupName || "").toLowerCase();
   const requestedLedgerName = normalizeName(ledgerName || "").toLowerCase();
@@ -2168,11 +2164,16 @@ async function buildPartyMovementDetailReport(
 
     vouchers.forEach((voucher) => {
       const partyMeta = resolveInventoryPartyMeta(voucher, ledgerMap);
-      const voucherGroupName = normalizeName(partyMeta.groupName || "").toLowerCase();
-      const voucherLedgerName = normalizeName(partyMeta.ledgerName || "").toLowerCase();
+      const voucherGroupName = normalizeName(
+        partyMeta.groupName || "",
+      ).toLowerCase();
+      const voucherLedgerName = normalizeName(
+        partyMeta.ledgerName || "",
+      ).toLowerCase();
 
       if (requestedGroupName && voucherGroupName !== requestedGroupName) return;
-      if (requestedLedgerName && voucherLedgerName !== requestedLedgerName) return;
+      if (requestedLedgerName && voucherLedgerName !== requestedLedgerName)
+        return;
 
       (voucher.inventoryLines || []).forEach((line, index) => {
         const item = itemMap.get(String(line.itemId)) || {};
@@ -2242,12 +2243,18 @@ async function buildPartyMovementDetailReport(
 
   vouchers.forEach((voucher) => {
     const partyMeta = resolveInventoryPartyMeta(voucher, ledgerMap);
-    const voucherGroupName = normalizeName(partyMeta.groupName || "").toLowerCase();
-    const voucherLedgerName = normalizeName(partyMeta.ledgerName || "").toLowerCase();
+    const voucherGroupName = normalizeName(
+      partyMeta.groupName || "",
+    ).toLowerCase();
+    const voucherLedgerName = normalizeName(
+      partyMeta.ledgerName || "",
+    ).toLowerCase();
 
     if (requestedGroupName && voucherGroupName !== requestedGroupName) return;
 
-    const key = normalizeName(partyMeta.ledgerName || "").toLowerCase() || "unassigned-ledger";
+    const key =
+      normalizeName(partyMeta.ledgerName || "").toLowerCase() ||
+      "unassigned-ledger";
     const state = accumulator.get(key) || {
       id: key,
       name: partyMeta.ledgerName || "Unassigned Ledger",
@@ -2277,13 +2284,19 @@ async function buildPartyMovementDetailReport(
       const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
 
       if (direction > 0) {
-        state.metrics.purchaseQty = normalizeMoney(state.metrics.purchaseQty + qty);
-        state.metrics.purchaseValue = normalizeMoney(state.metrics.purchaseValue + value);
+        state.metrics.purchaseQty = normalizeMoney(
+          state.metrics.purchaseQty + qty,
+        );
+        state.metrics.purchaseValue = normalizeMoney(
+          state.metrics.purchaseValue + value,
+        );
         totalPurchaseQty = normalizeMoney(totalPurchaseQty + qty);
         totalPurchaseValue = normalizeMoney(totalPurchaseValue + value);
       } else {
         state.metrics.salesQty = normalizeMoney(state.metrics.salesQty + qty);
-        state.metrics.salesValue = normalizeMoney(state.metrics.salesValue + value);
+        state.metrics.salesValue = normalizeMoney(
+          state.metrics.salesValue + value,
+        );
         totalSalesQty = normalizeMoney(totalSalesQty + qty);
         totalSalesValue = normalizeMoney(totalSalesValue + value);
       }
@@ -2297,7 +2310,9 @@ async function buildPartyMovementDetailReport(
           : state.metrics.lastVoucherOn;
       state.metrics.averagePurchaseRate =
         state.metrics.purchaseQty !== 0
-          ? normalizeMoney(state.metrics.purchaseValue / state.metrics.purchaseQty)
+          ? normalizeMoney(
+              state.metrics.purchaseValue / state.metrics.purchaseQty,
+            )
           : 0;
       state.metrics.averageSaleRate =
         state.metrics.salesQty !== 0
@@ -2835,6 +2850,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
     {
       _id: g.currentAssets,
       companyId,
@@ -2844,6 +2860,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
     {
       _id: g.stockInTrade,
       companyId,
@@ -2855,6 +2872,7 @@ async function seedDefaultMasters(companyId) {
       isSystem: true,
       systemKey: "stock-in-trade",
     },
+
     {
       _id: g.cashInHand,
       companyId,
@@ -2864,6 +2882,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
     {
       _id: g.bankAccounts,
       companyId,
@@ -2873,6 +2892,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
     {
       _id: g.sundryDebtors,
       companyId,
@@ -2882,6 +2902,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
     {
       _id: g.fixedAssets,
       companyId,
@@ -2891,6 +2912,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
     {
       _id: g.currentLiabilities,
       companyId,
@@ -2900,6 +2922,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
     {
       _id: g.sundryCreditors,
       companyId,
@@ -2909,6 +2932,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
     {
       _id: g.directExpenses,
       companyId,
@@ -2918,6 +2942,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: true,
       createdAt: now,
     },
+
     {
       _id: g.indirectExpenses,
       companyId,
@@ -2927,6 +2952,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
     {
       _id: g.directIncomes,
       companyId,
@@ -2936,6 +2962,7 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: true,
       createdAt: now,
     },
+
     {
       _id: g.indirectIncomes,
       companyId,
@@ -2945,27 +2972,49 @@ async function seedDefaultMasters(companyId) {
       affectsGrossProfit: false,
       createdAt: now,
     },
+
+    // =========================
+    // SALES ACCOUNT (PRIMARY)
+    // =========================
     {
       _id: g.salesAccounts,
       companyId,
       name: "Sales Accounts",
-      parentId: g.directIncomes,
+      parentId: null,
       nature: "INCOME",
       affectsGrossProfit: true,
       createdAt: now,
     },
+
+    // =========================
+    // PURCHASE ACCOUNT (PRIMARY)
+    // =========================
     {
       _id: g.purchaseAccounts,
       companyId,
       name: "Purchase Accounts",
-      parentId: g.directExpenses,
+      parentId: null,
       nature: "EXPENSE",
       affectsGrossProfit: true,
+      createdAt: now,
+    },
+
+    // =========================
+    // PROFIT & LOSS GROUP
+    // =========================
+    {
+      _id: g.profitAndLoss,
+      companyId,
+      name: "Profit & Loss",
+      parentId: null,
+      nature: "LIABILITY",
+      affectsGrossProfit: false,
       createdAt: now,
     },
   ]);
 
   // Default ledgers like Tally
+
   await Ledgers.insertMany([
     {
       companyId,
@@ -2975,14 +3024,16 @@ async function seedDefaultMasters(companyId) {
       openingDrCr: "DR",
       createdAt: now,
     },
+
     {
       companyId,
       name: "Profit & Loss A/c",
-      groupId: g.indirectExpenses,
+      groupId: g.profitAndLoss,
       openingBalance: 0,
       openingDrCr: "CR",
       createdAt: now,
     },
+
     {
       companyId,
       name: "Sales",
@@ -2993,6 +3044,7 @@ async function seedDefaultMasters(companyId) {
       isSystem: true,
       systemKey: "sales",
     },
+
     {
       companyId,
       name: "Purchase",
@@ -3004,7 +3056,6 @@ async function seedDefaultMasters(companyId) {
       systemKey: "purchase",
     },
   ]);
-
   // Default voucher types
   await VoucherTypes.insertMany([
     { companyId, name: "Contra", category: "ACCOUNTING", createdAt: now },
@@ -3809,60 +3860,65 @@ app.get("/companies/:companyId/customers", async (req, res) => {
   }
 });
 
-app.get("/companies/:companyId/customers/purchase-history", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const phone = normalizePhone(req.query.phone || "");
+app.get(
+  "/companies/:companyId/customers/purchase-history",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const phone = normalizePhone(req.query.phone || "");
 
-    if (!phone) {
-      return res.json({ customer: null, purchases: [] });
-    }
+      if (!phone) {
+        return res.json({ customer: null, purchases: [] });
+      }
 
-    const [customer, vouchers] = await Promise.all([
-      Customers.findOne({ companyId, phone }),
-      Vouchers.find({
-        companyId,
-        voucherName: { $regex: "^POS Voucher$", $options: "i" },
-        "customerSnapshot.phone": phone,
-      })
-        .sort({ date: -1, createdAt: -1, _id: -1 })
-        .toArray(),
-    ]);
+      const [customer, vouchers] = await Promise.all([
+        Customers.findOne({ companyId, phone }),
+        Vouchers.find({
+          companyId,
+          voucherName: { $regex: "^POS Voucher$", $options: "i" },
+          "customerSnapshot.phone": phone,
+        })
+          .sort({ date: -1, createdAt: -1, _id: -1 })
+          .toArray(),
+      ]);
 
-    const purchases = [];
-    vouchers.forEach((voucher) => {
-      const purchaseDate = voucher.date
-        ? new Date(voucher.date).toISOString().slice(0, 10)
-        : "";
-      (voucher.inventoryLines || []).forEach((line) => {
-        purchases.push({
-          voucherId: voucher._id,
-          voucherNumber: voucher.number || "",
-          purchaseDate,
-          itemId: line.itemId || null,
-          itemName: line.itemName || "",
-          qty: normalizeMoney(line.qty || line.billedQty || 0),
+      const purchases = [];
+      vouchers.forEach((voucher) => {
+        const purchaseDate = voucher.date
+          ? new Date(voucher.date).toISOString().slice(0, 10)
+          : "";
+        (voucher.inventoryLines || []).forEach((line) => {
+          purchases.push({
+            voucherId: voucher._id,
+            voucherNumber: voucher.number || "",
+            purchaseDate,
+            itemId: line.itemId || null,
+            itemName: line.itemName || "",
+            qty: normalizeMoney(line.qty || line.billedQty || 0),
+          });
         });
       });
-    });
 
-    return res.json({
-      customer: customer
-        ? {
-            _id: customer._id,
-            name: customer.name || "",
-            phone: customer.phone || "",
-            address: customer.address || "",
-            rewardPoints: normalizeMoney(customer.rewardPoints || 0),
-          }
-        : null,
-      purchases,
-    });
-  } catch (err) {
-    console.error("Error loading customer purchase history:", err);
-    return res.status(500).json({ message: "Error loading customer purchase history" });
-  }
-});
+      return res.json({
+        customer: customer
+          ? {
+              _id: customer._id,
+              name: customer.name || "",
+              phone: customer.phone || "",
+              address: customer.address || "",
+              rewardPoints: normalizeMoney(customer.rewardPoints || 0),
+            }
+          : null,
+        purchases,
+      });
+    } catch (err) {
+      console.error("Error loading customer purchase history:", err);
+      return res
+        .status(500)
+        .json({ message: "Error loading customer purchase history" });
+    }
+  },
+);
 
 app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
   try {
@@ -4211,33 +4267,33 @@ app.get(
   },
 );
 
-  app.get(
-    "/companies/:companyId/reports/customer-behaviour/product-wise",
-    async (req, res) => {
-      try {
-        const companyId = new ObjectId(req.params.companyId);
-        const itemId =
-          req.query.itemId && ObjectId.isValid(req.query.itemId)
-            ? new ObjectId(req.query.itemId)
-            : null;
-        const fromDate = safeDate(req.query.from);
-        const toDate = safeDate(req.query.to);
-        const voucherFilter = {
-          companyId,
-          voucherName: { $regex: "^POS Voucher$", $options: "i" },
-        };
-        if (fromDate || toDate) {
-          voucherFilter.date = {};
-          if (fromDate) voucherFilter.date.$gte = fromDate;
-          if (toDate) {
-            const inclusiveTo = new Date(toDate);
-            inclusiveTo.setHours(23, 59, 59, 999);
-            voucherFilter.date.$lte = inclusiveTo;
-          }
+app.get(
+  "/companies/:companyId/reports/customer-behaviour/product-wise",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const itemId =
+        req.query.itemId && ObjectId.isValid(req.query.itemId)
+          ? new ObjectId(req.query.itemId)
+          : null;
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      const voucherFilter = {
+        companyId,
+        voucherName: { $regex: "^POS Voucher$", $options: "i" },
+      };
+      if (fromDate || toDate) {
+        voucherFilter.date = {};
+        if (fromDate) voucherFilter.date.$gte = fromDate;
+        if (toDate) {
+          const inclusiveTo = new Date(toDate);
+          inclusiveTo.setHours(23, 59, 59, 999);
+          voucherFilter.date.$lte = inclusiveTo;
         }
-        const vouchers = await Vouchers.find(voucherFilter)
-          .sort({ date: -1 })
-          .toArray();
+      }
+      const vouchers = await Vouchers.find(voucherFilter)
+        .sort({ date: -1 })
+        .toArray();
 
       const productMap = new Map();
       vouchers.forEach((voucher) => {
@@ -6220,17 +6276,24 @@ app.get(
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       const level = normalizeName(req.query.level || "group").toLowerCase();
-      const report = await buildSalesPersonDrillReport(companyId, fromDate, toDate, {
-        salesPersonId: req.query.salesPersonId || "",
-        level,
-        groupId: req.query.groupId || "",
-        category: req.query.category || "",
-        itemId: req.query.itemId || "",
-      });
+      const report = await buildSalesPersonDrillReport(
+        companyId,
+        fromDate,
+        toDate,
+        {
+          salesPersonId: req.query.salesPersonId || "",
+          level,
+          groupId: req.query.groupId || "",
+          category: req.query.category || "",
+          itemId: req.query.itemId || "",
+        },
+      );
       res.json(report);
     } catch (err) {
       console.error("Error building sales person drill report:", err);
-      res.status(500).json({ message: "Error building sales person drill report" });
+      res
+        .status(500)
+        .json({ message: "Error building sales person drill report" });
     }
   },
 );
@@ -6244,15 +6307,22 @@ app.get(
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       const level = normalizeName(req.query.level || "ledger").toLowerCase();
-      const report = await buildPartyMovementDetailReport(companyId, fromDate, toDate, {
-        level,
-        groupName: req.query.groupName || "",
-        ledgerName: req.query.ledgerName || "",
-      });
+      const report = await buildPartyMovementDetailReport(
+        companyId,
+        fromDate,
+        toDate,
+        {
+          level,
+          groupName: req.query.groupName || "",
+          ledgerName: req.query.ledgerName || "",
+        },
+      );
       res.json(report);
     } catch (err) {
       console.error("Error building party movement detail report:", err);
-      res.status(500).json({ message: "Error building party movement detail report" });
+      res
+        .status(500)
+        .json({ message: "Error building party movement detail report" });
     }
   },
 );
