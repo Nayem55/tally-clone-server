@@ -2122,6 +2122,212 @@ async function buildSalesPersonDrillReport(
   };
 }
 
+async function buildPartyMovementDetailReport(
+  companyId,
+  fromDate = null,
+  toDate = null,
+  {
+    level = "ledger",
+    groupName = "",
+    ledgerName = "",
+  } = {},
+) {
+  const requestedGroupName = normalizeName(groupName || "").toLowerCase();
+  const requestedLedgerName = normalizeName(ledgerName || "").toLowerCase();
+
+  const [vouchers, ledgers, items] = await Promise.all([
+    Vouchers.find({
+      companyId,
+      ...(fromDate || toDate
+        ? {
+            date: {
+              ...(fromDate ? { $gte: fromDate } : {}),
+              ...(toDate ? { $lte: toDate } : {}),
+            },
+          }
+        : {}),
+      inventoryLines: { $exists: true, $ne: [] },
+    })
+      .sort({ date: -1, createdAt: -1 })
+      .toArray(),
+    Ledgers.find({ companyId }).toArray(),
+    Items.find({ companyId }).toArray(),
+  ]);
+
+  const ledgerMap = new Map(
+    ledgers.map((ledger) => [String(ledger._id), ledger.name]),
+  );
+  const itemMap = new Map(items.map((item) => [String(item._id), item]));
+
+  if (level === "voucher") {
+    const rows = [];
+    let purchaseQty = 0;
+    let purchaseValue = 0;
+    let salesQty = 0;
+    let salesValue = 0;
+
+    vouchers.forEach((voucher) => {
+      const partyMeta = resolveInventoryPartyMeta(voucher, ledgerMap);
+      const voucherGroupName = normalizeName(partyMeta.groupName || "").toLowerCase();
+      const voucherLedgerName = normalizeName(partyMeta.ledgerName || "").toLowerCase();
+
+      if (requestedGroupName && voucherGroupName !== requestedGroupName) return;
+      if (requestedLedgerName && voucherLedgerName !== requestedLedgerName) return;
+
+      (voucher.inventoryLines || []).forEach((line, index) => {
+        const item = itemMap.get(String(line.itemId)) || {};
+        if (inventoryRoleKey(item.inventoryRole) === "raw_material") return;
+
+        const direction = getInventoryLineDirection(line, voucher.voucherName);
+        if (direction === 0) return;
+
+        const qty = normalizeMoney(Number(line.qty || 0));
+        const rate = normalizeMoney(Number(line.rate || 0));
+        const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
+
+        if (direction > 0) {
+          purchaseQty = normalizeMoney(purchaseQty + qty);
+          purchaseValue = normalizeMoney(purchaseValue + value);
+        } else {
+          salesQty = normalizeMoney(salesQty + qty);
+          salesValue = normalizeMoney(salesValue + value);
+        }
+
+        rows.push({
+          id: `${voucher._id}-${index}`,
+          voucherId: String(voucher._id),
+          date: voucher.date || null,
+          dateLabel: formatDateLabel(voucher.date),
+          voucherName: voucher.voucherName || "Voucher",
+          number:
+            voucher.number ||
+            voucher.invoiceNumber ||
+            voucher.voucherNumber ||
+            "",
+          groupName: partyMeta.groupName || "Unassigned Party",
+          ledgerName: partyMeta.ledgerName || "Unassigned Ledger",
+          itemName:
+            normalizeName(line.itemName || item.name || "") || "Unnamed Item",
+          direction: direction > 0 ? "Purchase" : "Sale",
+          qty,
+          rate,
+          value,
+        });
+      });
+    });
+
+    rows.sort((left, right) => {
+      const leftTime = left.date ? new Date(left.date).getTime() : 0;
+      const rightTime = right.date ? new Date(right.date).getTime() : 0;
+      if (leftTime !== rightTime) return rightTime - leftTime;
+      return left.itemName.localeCompare(right.itemName);
+    });
+
+    return {
+      rows,
+      totals: {
+        purchaseQty,
+        purchaseValue,
+        salesQty,
+        salesValue,
+      },
+    };
+  }
+
+  const accumulator = new Map();
+  let totalPurchaseQty = 0;
+  let totalPurchaseValue = 0;
+  let totalSalesQty = 0;
+  let totalSalesValue = 0;
+
+  vouchers.forEach((voucher) => {
+    const partyMeta = resolveInventoryPartyMeta(voucher, ledgerMap);
+    const voucherGroupName = normalizeName(partyMeta.groupName || "").toLowerCase();
+    const voucherLedgerName = normalizeName(partyMeta.ledgerName || "").toLowerCase();
+
+    if (requestedGroupName && voucherGroupName !== requestedGroupName) return;
+
+    const key = normalizeName(partyMeta.ledgerName || "").toLowerCase() || "unassigned-ledger";
+    const state = accumulator.get(key) || {
+      id: key,
+      name: partyMeta.ledgerName || "Unassigned Ledger",
+      secondaryLabel: partyMeta.groupName || "",
+      metrics: {
+        purchaseQty: 0,
+        purchaseValue: 0,
+        salesQty: 0,
+        salesValue: 0,
+        invoiceCount: 0,
+        averagePurchaseRate: 0,
+        averageSaleRate: 0,
+        lastVoucherOn: null,
+      },
+      invoiceIds: new Set(),
+    };
+
+    (voucher.inventoryLines || []).forEach((line) => {
+      const item = itemMap.get(String(line.itemId)) || {};
+      if (inventoryRoleKey(item.inventoryRole) === "raw_material") return;
+
+      const direction = getInventoryLineDirection(line, voucher.voucherName);
+      if (direction === 0) return;
+
+      const qty = normalizeMoney(Number(line.qty || 0));
+      const rate = normalizeMoney(Number(line.rate || 0));
+      const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
+
+      if (direction > 0) {
+        state.metrics.purchaseQty = normalizeMoney(state.metrics.purchaseQty + qty);
+        state.metrics.purchaseValue = normalizeMoney(state.metrics.purchaseValue + value);
+        totalPurchaseQty = normalizeMoney(totalPurchaseQty + qty);
+        totalPurchaseValue = normalizeMoney(totalPurchaseValue + value);
+      } else {
+        state.metrics.salesQty = normalizeMoney(state.metrics.salesQty + qty);
+        state.metrics.salesValue = normalizeMoney(state.metrics.salesValue + value);
+        totalSalesQty = normalizeMoney(totalSalesQty + qty);
+        totalSalesValue = normalizeMoney(totalSalesValue + value);
+      }
+
+      state.invoiceIds.add(String(voucher._id));
+      state.metrics.invoiceCount = state.invoiceIds.size;
+      state.metrics.lastVoucherOn =
+        !state.metrics.lastVoucherOn ||
+        new Date(voucher.date) > new Date(state.metrics.lastVoucherOn)
+          ? voucher.date
+          : state.metrics.lastVoucherOn;
+      state.metrics.averagePurchaseRate =
+        state.metrics.purchaseQty !== 0
+          ? normalizeMoney(state.metrics.purchaseValue / state.metrics.purchaseQty)
+          : 0;
+      state.metrics.averageSaleRate =
+        state.metrics.salesQty !== 0
+          ? normalizeMoney(state.metrics.salesValue / state.metrics.salesQty)
+          : 0;
+    });
+
+    accumulator.set(key, state);
+  });
+
+  const rows = [...accumulator.values()]
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      secondaryLabel: row.secondaryLabel,
+      metrics: row.metrics,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  return {
+    rows,
+    totals: {
+      purchaseQty: totalPurchaseQty,
+      purchaseValue: totalPurchaseValue,
+      salesQty: totalSalesQty,
+      salesValue: totalSalesValue,
+    },
+  };
+}
+
 async function buildStockGroupSummary(
   companyId,
   fromDate = null,
@@ -6025,6 +6231,28 @@ app.get(
     } catch (err) {
       console.error("Error building sales person drill report:", err);
       res.status(500).json({ message: "Error building sales person drill report" });
+    }
+  },
+);
+
+app.get(
+  "/companies/:companyId/reports/party-movement-detail",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await ensureCompanyCoreMasters(companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      const level = normalizeName(req.query.level || "ledger").toLowerCase();
+      const report = await buildPartyMovementDetailReport(companyId, fromDate, toDate, {
+        level,
+        groupName: req.query.groupName || "",
+        ledgerName: req.query.ledgerName || "",
+      });
+      res.json(report);
+    } catch (err) {
+      console.error("Error building party movement detail report:", err);
+      res.status(500).json({ message: "Error building party movement detail report" });
     }
   },
 );
