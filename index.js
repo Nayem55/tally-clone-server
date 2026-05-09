@@ -2836,6 +2836,7 @@ async function seedDefaultMasters(companyId) {
     indirectIncomes: new ObjectId(),
     salesAccounts: new ObjectId(),
     purchaseAccounts: new ObjectId(),
+    profitAndLoss: new ObjectId(),
   };
 
   const now = new Date();
@@ -5690,74 +5691,61 @@ app.get("/companies/:companyId/chart-of-accounts/groups", async (req, res) => {
     res.status(500).json({ message: "Error loading chart of account groups" });
   }
 });
-// ---------- CHART OF ACCOUNTS: LEDGERS (hierarchical list) ----------
+// ---------- CHART OF ACCOUNTS: LEDGERS (ledger-only hierarchy) ----------
 app.get("/companies/:companyId/chart-of-accounts/ledgers", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
 
     const groups = await Groups.find({ companyId }).toArray();
     const ledgers = await Ledgers.find({ companyId }).toArray();
+    const groupMap = new Map(groups.map((group) => [String(group._id), group]));
+    const depthCache = new Map();
 
-    // Build group → child groups
-    const childGroups = new Map();
-    groups.forEach((g) => {
-      const key = g.parentId ? String(g.parentId) : "ROOT";
-      if (!childGroups.has(key)) childGroups.set(key, []);
-      childGroups.get(key).push(g);
-    });
-
-    // Build group → ledgers
-    const groupLedgers = new Map();
-    ledgers.forEach((l) => {
-      const key = String(l.groupId);
-      if (!groupLedgers.has(key)) groupLedgers.set(key, []);
-      groupLedgers.get(key).push(l);
-    });
-
-    // Sort groups & ledgers alphabetically
-    for (const list of childGroups.values()) {
-      list.sort((a, b) => a.name.localeCompare(b.name));
-    }
-    for (const list of groupLedgers.values()) {
-      list.sort((a, b) => a.name.localeCompare(b.name));
-    }
-
-    const result = [];
-
-    function walkGroup(parentKey, level) {
-      const children = childGroups.get(parentKey) || [];
-
-      for (const g of children) {
-        // Add group entry
-        result.push({
-          type: "group",
-          id: g._id,
-          name: g.name,
-          level,
-        });
-
-        // Add ledgers of this group
-        const lds = groupLedgers.get(String(g._id)) || [];
-        lds.forEach((l) => {
-          result.push({
-            type: "ledger",
-            id: l._id,
-            name: l.name,
-            level: level + 1,
-          });
-        });
-
-        // Process child groups
-        walkGroup(String(g._id), level + 1);
+    function getGroupDepth(groupId) {
+      const key = String(groupId || "");
+      if (!key) return 0;
+      if (depthCache.has(key)) return depthCache.get(key);
+      const group = groupMap.get(key);
+      if (!group) {
+        depthCache.set(key, 0);
+        return 0;
       }
+      const depth = group.parentId ? getGroupDepth(group.parentId) + 1 : 0;
+      depthCache.set(key, depth);
+      return depth;
     }
 
-    walkGroup("ROOT", 0);
+    function getGroupPath(groupId) {
+      const names = [];
+      let current = groupMap.get(String(groupId || ""));
+      while (current) {
+        names.unshift(current.name);
+        current = current.parentId ? groupMap.get(String(current.parentId)) : null;
+      }
+      return names.join(" / ");
+    }
+
+    const result = ledgers
+      .map((ledger) => ({
+        type: "ledger",
+        id: ledger._id,
+        name: ledger.name,
+        level: getGroupDepth(ledger.groupId),
+        groupPath: getGroupPath(ledger.groupId),
+        parentId: null,
+      }))
+      .sort((left, right) => {
+        if (left.level !== right.level) return left.level - right.level;
+        if (left.groupPath !== right.groupPath) {
+          return left.groupPath.localeCompare(right.groupPath);
+        }
+        return left.name.localeCompare(right.name);
+      });
 
     res.json(result);
   } catch (err) {
-    console.error("Error building ledger tree:", err);
-    res.status(500).json({ message: "Error loading ledger tree" });
+    console.error("Error building chart-of-accounts ledgers:", err);
+    res.status(500).json({ message: "Error loading chart of account ledgers" });
   }
 });
 // ---------- CHART OF ACCOUNTS: STOCK ITEMS (hierarchical list) ----------
@@ -8007,3 +7995,4 @@ connectDb()
     console.error("Failed to connect DB:", err);
     process.exit(1);
   });
+
