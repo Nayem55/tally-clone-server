@@ -185,6 +185,43 @@ function normalizeManufacturingMeta(meta = {}) {
   };
 }
 
+function normalizeSalesMeta(meta = {}) {
+  if (!meta) return null;
+  const employeeName = normalizeName(meta.employeeName || "");
+  const employeeNumber = normalizeTextBlock(meta.employeeNumber || "");
+  const employeeId =
+    meta.employeeId && ObjectId.isValid(meta.employeeId)
+      ? new ObjectId(meta.employeeId)
+      : null;
+
+  if (!employeeId && !employeeName && !employeeNumber) {
+    return null;
+  }
+
+  return {
+    employeeId,
+    employeeName,
+    employeeNumber,
+    department: normalizeTextBlock(meta.department || ""),
+    designation: normalizeTextBlock(meta.designation || ""),
+  };
+}
+
+function salesPersonKeyFromMeta(meta = {}) {
+  if (!meta) return "unassigned";
+  return (
+    String(meta.employeeId || "") ||
+    normalizeTextBlock(meta.employeeNumber || "") ||
+    normalizeName(meta.employeeName || "").toLowerCase() ||
+    "unassigned"
+  );
+}
+
+function voucherMatchesSalesPerson(voucher = {}, salesPersonId = "") {
+  if (!salesPersonId) return true;
+  return salesPersonKeyFromMeta(voucher.salesMeta || {}) === String(salesPersonId);
+}
+
 function formatProductionNumber(companyName = "", currentCount = 0) {
   const companySlug = slugifySegment(companyName || "company") || "company";
   return `${companySlug}-manufacturing-${String(currentCount + 1).padStart(
@@ -1092,7 +1129,26 @@ async function buildInventoryDetailReport(
     }).toArray(),
   ]);
 
-  const items = allItems.filter((item) => itemMatchesRoleFilter(item, options));
+  const requestedGroupId = options.groupId ? String(options.groupId) : "";
+  const requestedCategory = normalizeName(options.category || "").toLowerCase();
+  const requestedItemId = options.itemId ? String(options.itemId) : "";
+  const requestedSalesPersonId = options.salesPersonId
+    ? String(options.salesPersonId)
+    : "";
+
+  const items = allItems.filter((item) => {
+    if (!itemMatchesRoleFilter(item, options)) return false;
+    if (requestedItemId && String(item._id) !== requestedItemId) return false;
+    if (requestedGroupId && String(item.groupId || "") !== requestedGroupId)
+      return false;
+    if (
+      requestedCategory &&
+      normalizeName(item.stockCategory || "").toLowerCase() !== requestedCategory
+    ) {
+      return false;
+    }
+    return true;
+  });
   const itemIdSet = new Set(items.map((item) => String(item._id)));
   const groupsById = new Map(groups.map((group) => [String(group._id), group]));
   const itemStateMap = new Map(
@@ -1132,6 +1188,10 @@ async function buildInventoryDetailReport(
       return leftTime - rightTime;
     })
     .forEach((voucher) => {
+      if (requestedSalesPersonId) {
+        if (!/^sales$/i.test(String(voucher.voucherName || ""))) return;
+        if (!voucherMatchesSalesPerson(voucher, requestedSalesPersonId)) return;
+      }
       if (!Array.isArray(voucher.inventoryLines)) return;
 
       const voucherDate = voucher?.date ? new Date(voucher.date) : null;
@@ -1454,13 +1514,147 @@ async function buildInventoryMovementDimensionReport(
   fromDate = null,
   toDate = null,
   dimension = "stock-item",
+  options = {},
 ) {
+  const requestedSalesPersonId = options.salesPersonId
+    ? String(options.salesPersonId)
+    : "";
+  if (dimension === "sales-person") {
+    const vouchers = await Vouchers.find({
+      companyId,
+      voucherName: { $regex: "^Sales$", $options: "i" },
+      ...(fromDate || toDate
+        ? {
+            date: {
+              ...(fromDate ? { $gte: fromDate } : {}),
+              ...(toDate ? { $lte: toDate } : {}),
+            },
+          }
+        : {}),
+    })
+      .sort({ date: -1, createdAt: -1 })
+      .toArray();
+
+    const accumulator = new Map();
+
+    vouchers.forEach((voucher) => {
+      const salesMeta = voucher.salesMeta || {};
+      const key = salesPersonKeyFromMeta(salesMeta);
+      const employeeName =
+        normalizeName(salesMeta.employeeName || "") || "Unassigned";
+      const employeeNumber = normalizeTextBlock(salesMeta.employeeNumber || "");
+      const department = normalizeTextBlock(salesMeta.department || "");
+      const designation = normalizeTextBlock(salesMeta.designation || "");
+      const state = accumulator.get(key) || {
+        id: key,
+        name: employeeName,
+        secondaryLabel:
+          [employeeNumber, department || designation]
+            .filter(Boolean)
+            .join(" | ") || "Sales employee",
+        metrics: {
+          salesQty: 0,
+          salesValue: 0,
+          invoiceCount: 0,
+          customerCount: 0,
+          lastSaleOn: null,
+        },
+      };
+      const customerKey = normalizeTextBlock(
+        voucher.customerSnapshot?.phone ||
+          voucher.customerSnapshot?.name ||
+          voucher.lines?.[0]?.ledgerId ||
+          "",
+      );
+      const customerSet = state.customerSet || new Set();
+      if (customerKey) {
+        customerSet.add(customerKey);
+      }
+
+      const itemTotals = (voucher.inventoryLines || []).reduce(
+        (sum, line) => ({
+          salesQty: normalizeMoney(sum.salesQty + Number(line.qty || 0)),
+          salesValue: 0,
+        }),
+        { salesQty: 0, salesValue: 0 },
+      );
+      const voucherSalesValue = voucherTotalAmount(voucher);
+
+      state.metrics.salesQty = normalizeMoney(
+        state.metrics.salesQty + itemTotals.salesQty,
+      );
+      state.metrics.salesValue = normalizeMoney(
+        state.metrics.salesValue + voucherSalesValue,
+      );
+      state.metrics.invoiceCount += 1;
+      state.metrics.customerCount = customerSet.size;
+      state.metrics.lastSaleOn =
+        !state.metrics.lastSaleOn ||
+        new Date(voucher.date) > new Date(state.metrics.lastSaleOn)
+          ? voucher.date
+          : state.metrics.lastSaleOn;
+      state.customerSet = customerSet;
+      accumulator.set(key, state);
+    });
+
+    const rows = [...accumulator.values()]
+      .map((row) => {
+        const { customerSet, ...rest } = row;
+        return {
+          ...rest,
+          metrics: {
+            ...row.metrics,
+            averageValuePerInvoice: row.metrics.invoiceCount
+              ? normalizeMoney(
+                  row.metrics.salesValue / row.metrics.invoiceCount,
+                )
+              : 0,
+          },
+        };
+      })
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    const totals = rows.reduce(
+      (sum, row) => {
+        sum.salesQty = normalizeMoney(
+          sum.salesQty + Number(row.metrics.salesQty || 0),
+        );
+        sum.salesValue = normalizeMoney(
+          sum.salesValue + Number(row.metrics.salesValue || 0),
+        );
+        sum.invoiceCount += Number(row.metrics.invoiceCount || 0);
+        sum.customerCount += Number(row.metrics.customerCount || 0);
+        return sum;
+      },
+      {
+        salesQty: 0,
+        salesValue: 0,
+        invoiceCount: 0,
+        customerCount: 0,
+      },
+    );
+
+    return {
+      rows,
+      totals: {
+        ...totals,
+        averageValuePerInvoice: totals.invoiceCount
+          ? normalizeMoney(totals.salesValue / totals.invoiceCount)
+          : 0,
+      },
+    };
+  }
+
   const detailReport = await buildInventoryDetailReport(
     companyId,
     fromDate,
     toDate,
     {
       excludeRoles: ["raw_material"],
+      salesPersonId: options.salesPersonId,
+      groupId: options.groupId,
+      category: options.category,
+      itemId: options.itemId,
     },
   );
 
@@ -1556,6 +1750,10 @@ async function buildInventoryMovementDimensionReport(
       return leftTime - rightTime;
     })
     .forEach((voucher) => {
+      if (requestedSalesPersonId) {
+        if (!/^sales$/i.test(String(voucher.voucherName || ""))) return;
+        if (!voucherMatchesSalesPerson(voucher, requestedSalesPersonId)) return;
+      }
       if (!Array.isArray(voucher.inventoryLines)) return;
 
       const voucherDate = voucher?.date ? new Date(voucher.date) : null;
@@ -3846,6 +4044,7 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       date,
       narration,
       commercialMeta,
+      salesMeta,
       manufacturingMeta,
       lines,
       inventoryLines,
@@ -3925,6 +4124,13 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       };
     }
 
+    if (salesMeta) {
+      const normalizedSalesMeta = normalizeSalesMeta(salesMeta);
+      if (normalizedSalesMeta) {
+        doc.salesMeta = normalizedSalesMeta;
+      }
+    }
+
     if (manufacturingMeta) {
       doc.manufacturingMeta = normalizeManufacturingMeta(manufacturingMeta);
     }
@@ -3960,12 +4166,13 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
       customerSnapshot,
       commercialMeta,
       posMeta,
+      salesMeta,
       manufacturingMeta,
       lines,
       inventoryLines,
     } = req.body;
 
-    const update = { $set: {} };
+    const update = { $set: {}, $unset: {} };
     let voucherType = null;
 
     if (voucherTypeId) {
@@ -4017,6 +4224,15 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
         changeAmount: normalizeMoney(posMeta.changeAmount || 0),
       };
     }
+    if (salesMeta !== undefined) {
+      const normalizedSalesMeta = normalizeSalesMeta(salesMeta);
+      if (normalizedSalesMeta) {
+        update.$set.salesMeta = normalizedSalesMeta;
+        delete update.$unset.salesMeta;
+      } else {
+        update.$unset.salesMeta = "";
+      }
+    }
     if (manufacturingMeta) {
       update.$set.manufacturingMeta =
         normalizeManufacturingMeta(manufacturingMeta);
@@ -4053,6 +4269,10 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
       update.$set.inventoryLines = inventoryLines
         .filter((line) => line?.itemId)
         .map(normalizeInventoryLinePayload);
+    }
+
+    if (Object.keys(update.$unset).length === 0) {
+      delete update.$unset;
     }
 
     await Vouchers.updateOne({ _id: voucherId, companyId }, update);
@@ -5396,6 +5616,10 @@ app.get(
         toDate,
         {
           excludeRoles: ["raw_material"],
+          salesPersonId: req.query.salesPersonId || "",
+          groupId: req.query.groupId || "",
+          category: req.query.category || "",
+          itemId: req.query.itemId || "",
         },
       );
       res.json(summary);
@@ -5420,6 +5644,10 @@ app.get(
         toDate,
         {
           excludeRoles: ["raw_material"],
+          salesPersonId: req.query.salesPersonId || "",
+          groupId: req.query.groupId || "",
+          category: req.query.category || "",
+          itemId: req.query.itemId || "",
         },
       );
       res.json(summary);
@@ -5498,6 +5726,12 @@ app.get(
         fromDate,
         toDate,
         dimension,
+        {
+          salesPersonId: req.query.salesPersonId || "",
+          groupId: req.query.groupId || "",
+          category: req.query.category || "",
+          itemId: req.query.itemId || "",
+        },
       );
 
       res.json(report);
