@@ -1861,6 +1861,267 @@ async function buildInventoryMovementDimensionReport(
   };
 }
 
+async function buildSalesPersonDrillReport(
+  companyId,
+  fromDate = null,
+  toDate = null,
+  {
+    salesPersonId = "",
+    level = "group",
+    groupId = "",
+    category = "",
+    itemId = "",
+  } = {},
+) {
+  const requestedSalesPersonId = String(salesPersonId || "").trim();
+  const requestedGroupId = String(groupId || "").trim();
+  const requestedCategory = normalizeName(category || "").toLowerCase();
+  const requestedItemId = String(itemId || "").trim();
+
+  if (!requestedSalesPersonId) {
+    return {
+      rows: [],
+      totals: {
+        salesQty: 0,
+        salesValue: 0,
+        invoiceCount: 0,
+        customerCount: 0,
+      },
+    };
+  }
+
+  const [groups, items, vouchers] = await Promise.all([
+    Groups.find({ companyId }).toArray(),
+    Items.find({ companyId }).toArray(),
+    Vouchers.find({
+      companyId,
+      voucherName: { $regex: "^Sales$", $options: "i" },
+      ...(fromDate || toDate
+        ? {
+            date: {
+              ...(fromDate ? { $gte: fromDate } : {}),
+              ...(toDate ? { $lte: toDate } : {}),
+            },
+          }
+        : {}),
+    })
+      .sort({ date: -1, createdAt: -1 })
+      .toArray(),
+  ]);
+
+  const itemById = new Map(items.map((item) => [String(item._id), item]));
+  const groupById = new Map(groups.map((group) => [String(group._id), group]));
+  const salesVouchers = vouchers.filter((voucher) =>
+    voucherMatchesSalesPerson(voucher, requestedSalesPersonId),
+  );
+
+  const customerKeyOfVoucher = (voucher = {}) =>
+    normalizeTextBlock(
+      voucher.customerSnapshot?.phone ||
+        voucher.customerSnapshot?.name ||
+        voucher.lines?.[0]?.ledgerId ||
+        "",
+    );
+
+  if (level === "voucher") {
+    const rows = [];
+    const customerSet = new Set();
+    let totalQty = 0;
+    let totalValue = 0;
+
+    salesVouchers.forEach((voucher) => {
+      const customerKey = customerKeyOfVoucher(voucher);
+      if (customerKey) customerSet.add(customerKey);
+
+      (voucher.inventoryLines || []).forEach((line, index) => {
+        const item = itemById.get(String(line.itemId)) || {};
+        if (inventoryRoleKey(item.inventoryRole) === "raw_material") return;
+        if (requestedItemId && String(line.itemId) !== requestedItemId) return;
+        if (requestedGroupId && String(item.groupId || "") !== requestedGroupId)
+          return;
+        if (
+          requestedCategory &&
+          normalizeName(item.stockCategory || "").toLowerCase() !==
+            requestedCategory
+        ) {
+          return;
+        }
+
+        const qty = normalizeMoney(Number(line.qty || 0));
+        const rate = normalizeMoney(Number(line.rate || 0));
+        const value = normalizeMoney(
+          Number(line.amount || 0) || qty * rate,
+        );
+        totalQty = normalizeMoney(totalQty + qty);
+        totalValue = normalizeMoney(totalValue + value);
+
+        rows.push({
+          id: `${voucher._id}-${index}`,
+          voucherId: String(voucher._id),
+          date: voucher.date || null,
+          dateLabel: formatDateLabel(voucher.date),
+          voucherName: voucher.voucherName || "Sales",
+          number:
+            voucher.number ||
+            voucher.invoiceNumber ||
+            voucher.voucherNumber ||
+            "",
+          customerName:
+            normalizeName(voucher.customerSnapshot?.name || "") ||
+            normalizeName(voucher.partyName || "") ||
+            "Walk-in Customer",
+          itemId: String(line.itemId || ""),
+          itemName:
+            normalizeName(line.itemName || item.name || "") || "Unnamed Item",
+          groupId: String(item.groupId || ""),
+          groupName:
+            normalizeName(groupById.get(String(item.groupId || ""))?.name || "") ||
+            "Ungrouped",
+          categoryName:
+            normalizeName(item.stockCategory || "") || "Uncategorized",
+          qty,
+          rate,
+          value,
+        });
+      });
+    });
+
+    rows.sort((left, right) => {
+      const leftTime = left.date ? new Date(left.date).getTime() : 0;
+      const rightTime = right.date ? new Date(right.date).getTime() : 0;
+      if (leftTime !== rightTime) return rightTime - leftTime;
+      return left.itemName.localeCompare(right.itemName);
+    });
+
+    return {
+      rows,
+      totals: {
+        salesQty: totalQty,
+        salesValue: totalValue,
+        invoiceCount: new Set(rows.map((row) => row.voucherId)).size,
+        customerCount: customerSet.size,
+      },
+    };
+  }
+
+  const accumulator = new Map();
+  const totals = {
+    salesQty: 0,
+    salesValue: 0,
+    invoiceIds: new Set(),
+    customerKeys: new Set(),
+  };
+
+  salesVouchers.forEach((voucher) => {
+    const voucherCustomerKey = customerKeyOfVoucher(voucher);
+
+    (voucher.inventoryLines || []).forEach((line) => {
+      const item = itemById.get(String(line.itemId)) || {};
+      if (inventoryRoleKey(item.inventoryRole) === "raw_material") return;
+
+      const itemGroupId = String(item.groupId || "");
+      const itemGroupName =
+        normalizeName(groupById.get(itemGroupId)?.name || "") || "Ungrouped";
+      const itemCategoryName =
+        normalizeName(item.stockCategory || "") || "Uncategorized";
+
+      if (requestedGroupId && itemGroupId !== requestedGroupId) return;
+      if (
+        requestedCategory &&
+        itemCategoryName.toLowerCase() !== requestedCategory
+      ) {
+        return;
+      }
+      if (requestedItemId && String(line.itemId) !== requestedItemId) return;
+
+      const qty = normalizeMoney(Number(line.qty || 0));
+      const rate = normalizeMoney(Number(line.rate || 0));
+      const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
+
+      totals.salesQty = normalizeMoney(totals.salesQty + qty);
+      totals.salesValue = normalizeMoney(totals.salesValue + value);
+      totals.invoiceIds.add(String(voucher._id));
+      if (voucherCustomerKey) totals.customerKeys.add(voucherCustomerKey);
+
+      let key = String(line.itemId || "");
+      let name =
+        normalizeName(line.itemName || item.name || "") || "Unnamed Item";
+      let secondaryLabel = itemGroupName;
+
+      if (level === "group") {
+        key = itemGroupId || "ungrouped";
+        name = itemGroupName;
+        secondaryLabel = "";
+      } else if (level === "category") {
+        key = itemCategoryName.toLowerCase() || "uncategorized";
+        name = itemCategoryName;
+        secondaryLabel = itemGroupName;
+      }
+
+      const state = accumulator.get(key) || {
+        id: key,
+        name,
+        secondaryLabel,
+        metrics: {
+          salesQty: 0,
+          salesValue: 0,
+          invoiceCount: 0,
+          customerCount: 0,
+          averageRate: 0,
+          lastSaleOn: null,
+        },
+        invoiceIds: new Set(),
+        customerKeys: new Set(),
+      };
+
+      state.metrics.salesQty = normalizeMoney(state.metrics.salesQty + qty);
+      state.metrics.salesValue = normalizeMoney(
+        state.metrics.salesValue + value,
+      );
+      state.invoiceIds.add(String(voucher._id));
+      if (voucherCustomerKey) state.customerKeys.add(voucherCustomerKey);
+      state.metrics.invoiceCount = state.invoiceIds.size;
+      state.metrics.customerCount = state.customerKeys.size;
+      state.metrics.lastSaleOn =
+        !state.metrics.lastSaleOn ||
+        new Date(voucher.date) > new Date(state.metrics.lastSaleOn)
+          ? voucher.date
+          : state.metrics.lastSaleOn;
+      state.metrics.averageRate =
+        state.metrics.salesQty !== 0
+          ? normalizeMoney(
+              state.metrics.salesValue / state.metrics.salesQty,
+            )
+          : 0;
+
+      accumulator.set(key, state);
+    });
+  });
+
+  const rows = [...accumulator.values()]
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      secondaryLabel: row.secondaryLabel,
+      metrics: row.metrics,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  return {
+    rows,
+    totals: {
+      salesQty: totals.salesQty,
+      salesValue: totals.salesValue,
+      invoiceCount: totals.invoiceIds.size,
+      customerCount: totals.customerKeys.size,
+      averageRate:
+        totals.salesQty !== 0
+          ? normalizeMoney(totals.salesValue / totals.salesQty)
+          : 0,
+    },
+  };
+}
+
 async function buildStockGroupSummary(
   companyId,
   fromDate = null,
@@ -5740,6 +6001,30 @@ app.get(
       res
         .status(500)
         .json({ message: "Error building inventory movement analysis" });
+    }
+  },
+);
+
+app.get(
+  "/companies/:companyId/reports/sales-person-drill",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await ensureCompanyCoreMasters(companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      const level = normalizeName(req.query.level || "group").toLowerCase();
+      const report = await buildSalesPersonDrillReport(companyId, fromDate, toDate, {
+        salesPersonId: req.query.salesPersonId || "",
+        level,
+        groupId: req.query.groupId || "",
+        category: req.query.category || "",
+        itemId: req.query.itemId || "",
+      });
+      res.json(report);
+    } catch (err) {
+      console.error("Error building sales person drill report:", err);
+      res.status(500).json({ message: "Error building sales person drill report" });
     }
   },
 );
