@@ -5242,52 +5242,85 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
 app.get("/companies/:companyId/items", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
 
-  const items = await Items.aggregate([
-    { $match: { companyId } },
-    {
-      $lookup: {
-        from: "groups",
-        localField: "groupId",
-        foreignField: "_id",
-        as: "group",
+  const [items, vouchers] = await Promise.all([
+    Items.aggregate([
+      { $match: { companyId } },
+      {
+        $lookup: {
+          from: "groups",
+          localField: "groupId",
+          foreignField: "_id",
+          as: "group",
+        },
       },
-    },
-    { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
-    {
-      $lookup: {
-        from: "stockCategories",
-        localField: "stockCategoryId",
-        foreignField: "_id",
-        as: "stockCategoryMaster",
+      { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: "stockCategories",
+          localField: "stockCategoryId",
+          foreignField: "_id",
+          as: "stockCategoryMaster",
+        },
       },
-    },
-    {
-      $unwind: {
-        path: "$stockCategoryMaster",
-        preserveNullAndEmptyArrays: true,
+      {
+        $unwind: {
+          path: "$stockCategoryMaster",
+          preserveNullAndEmptyArrays: true,
+        },
       },
-    },
-    {
-      $lookup: {
-        from: "units",
-        localField: "unitId",
-        foreignField: "_id",
-        as: "unitMaster",
+      {
+        $lookup: {
+          from: "units",
+          localField: "unitId",
+          foreignField: "_id",
+          as: "unitMaster",
+        },
       },
-    },
-    { $unwind: { path: "$unitMaster", preserveNullAndEmptyArrays: true } },
-    {
-      $lookup: {
-        from: "godowns",
-        localField: "godownId",
-        foreignField: "_id",
-        as: "godownMaster",
+      { $unwind: { path: "$unitMaster", preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: "godowns",
+          localField: "godownId",
+          foreignField: "_id",
+          as: "godownMaster",
+        },
       },
-    },
-    { $unwind: { path: "$godownMaster", preserveNullAndEmptyArrays: true } },
-  ]).toArray();
+      { $unwind: { path: "$godownMaster", preserveNullAndEmptyArrays: true } },
+    ]).toArray(),
+    Vouchers.find({
+      companyId,
+      voucherName: { $in: ["Purchase", "Debit Note"] },
+      inventoryLines: { $exists: true, $ne: [] },
+    }).toArray(),
+  ]);
 
-  res.json(items);
+  const latestPurchaseByItem = new Map();
+  vouchers
+    .slice()
+    .sort((left, right) => {
+      const leftTime = new Date(left.date || left.createdAt || 0).getTime();
+      const rightTime = new Date(right.date || right.createdAt || 0).getTime();
+      return leftTime - rightTime;
+    })
+    .forEach((voucher) => {
+      const lines = Array.isArray(voucher.inventoryLines) ? voucher.inventoryLines : [];
+      lines.forEach((line) => {
+        const itemId = String(line.itemId || "");
+        if (!itemId) return;
+        const rate = Number(line.rate || 0);
+        if (!Number.isFinite(rate)) return;
+        latestPurchaseByItem.set(itemId, rate);
+      });
+    });
+
+  const enrichedItems = items.map((item) => ({
+    ...item,
+    lastPurchaseRate: latestPurchaseByItem.has(String(item._id))
+      ? Number(latestPurchaseByItem.get(String(item._id)) || 0)
+      : Number(item.openingRate || 0),
+  }));
+
+  res.json(enrichedItems);
 });
 
 // Create item (like Stock Item in Tally)
