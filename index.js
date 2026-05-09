@@ -1512,6 +1512,29 @@ function resolveInventoryPartyMeta(voucher, ledgerMap) {
   };
 }
 
+function resolveInventoryPartyLedger(voucher, ledgerById) {
+  const direction = inferStockDirection(voucher?.voucherName);
+  const lines = Array.isArray(voucher?.lines) ? voucher.lines : [];
+
+  const preferredLines =
+    direction > 0
+      ? lines.filter((line) => Number(line.credit || 0) > 0)
+      : direction < 0
+        ? lines.filter((line) => Number(line.debit || 0) > 0)
+        : lines;
+
+  return (
+    preferredLines
+      .map((line) => ledgerById.get(String(line.ledgerId || "")))
+      .find((ledger) => {
+        const name = normalizeName(ledger?.name || "");
+        return name && !["sales", "purchase"].includes(nameKey(name));
+      }) ||
+    ledgerById.get(String(lines[0]?.ledgerId || "")) ||
+    null
+  );
+}
+
 async function buildInventoryMovementDimensionReport(
   companyId,
   fromDate = null,
@@ -1729,7 +1752,7 @@ async function buildInventoryMovementDimensionReport(
     };
   }
 
-  const [vouchers, ledgers, items] = await Promise.all([
+  const [vouchers, ledgers, items, groups] = await Promise.all([
     Vouchers.find({
       companyId,
       ...(toDate ? { date: { $lte: toDate } } : {}),
@@ -1737,13 +1760,38 @@ async function buildInventoryMovementDimensionReport(
     }).toArray(),
     Ledgers.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
+    Groups.find({ companyId }).toArray(),
   ]);
 
   const ledgerMap = new Map(
     ledgers.map((ledger) => [String(ledger._id), ledger.name]),
   );
+  const ledgerById = new Map(ledgers.map((ledger) => [String(ledger._id), ledger]));
   const itemMap = new Map(items.map((item) => [String(item._id), item]));
-  const stateMap = new Map();
+  const groupById = new Map(groups.map((group) => [String(group._id), group]));
+  const ledgerStateMap = new Map();
+
+  function getGroupPath(groupId) {
+    const names = [];
+    let current = groupById.get(String(groupId || ""));
+    while (current) {
+      names.unshift(current.name);
+      current = current.parentId ? groupById.get(String(current.parentId)) : null;
+    }
+    return names.join(" / ");
+  }
+
+  function isDescendantGroup(groupId, ancestorGroupId) {
+    if (!ancestorGroupId) return true;
+    let currentKey = String(groupId || "");
+    const targetKey = String(ancestorGroupId || "");
+    while (currentKey) {
+      if (currentKey === targetKey) return true;
+      const currentGroup = groupById.get(currentKey);
+      currentKey = currentGroup?.parentId ? String(currentGroup.parentId) : "";
+    }
+    return false;
+  }
 
   vouchers
     .slice()
@@ -1768,19 +1816,14 @@ async function buildInventoryMovementDimensionReport(
           voucherDate >= fromDate &&
           (!toDate || voucherDate <= toDate));
 
-      const partyMeta = resolveInventoryPartyMeta(voucher, ledgerMap);
-      const key =
-        dimension === "group"
-          ? normalizeName(partyMeta.groupName).toLowerCase()
-          : normalizeName(partyMeta.ledgerName).toLowerCase();
-      const label =
-        dimension === "group" ? partyMeta.groupName : partyMeta.ledgerName;
-      const secondaryLabel = dimension === "group" ? "" : partyMeta.groupName;
-
-      const state = stateMap.get(key) || {
-        id: key,
-        name: label || "Unassigned",
-        secondaryLabel,
+      const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
+      if (!partyLedger) return;
+      const ledgerKey = String(partyLedger._id);
+      const state = ledgerStateMap.get(ledgerKey) || {
+        id: ledgerKey,
+        groupId: String(partyLedger.groupId || ""),
+        name: partyLedger.name || "Unnamed Ledger",
+        secondaryLabel: getGroupPath(partyLedger.groupId),
         metrics: emptyMovementAccumulator(),
       };
 
@@ -1823,35 +1866,57 @@ async function buildInventoryMovementDimensionReport(
           }
         }
 
-        state.metrics.closingQty = normalizeMoney(
-          state.metrics.closingQty + (direction > 0 ? qty : -qty),
-        );
-        state.metrics.closingValue = normalizeMoney(
-          state.metrics.closingValue + (direction > 0 ? value : -value),
-        );
       });
 
-      stateMap.set(key, state);
+      ledgerStateMap.set(ledgerKey, state);
     });
 
-  const rows = [...stateMap.values()]
-    .map((row) => ({
-      ...row,
-      metrics: buildMovementMetrics({
-        ...row.metrics,
-        closingQty: normalizeMoney(
-          row.metrics.openingQty +
-            row.metrics.inwardQty -
-            row.metrics.outwardQty,
-        ),
-        closingValue: normalizeMoney(
-          row.metrics.openingValue +
-            row.metrics.inwardValue -
-            row.metrics.outwardValue,
-        ),
-      }),
-    }))
-    .sort((left, right) => left.name.localeCompare(right.name));
+  if (dimension === "ledger") {
+    const rows = [...ledgerStateMap.values()]
+      .map((row) => ({
+        id: row.id,
+        name: row.name,
+        secondaryLabel: row.secondaryLabel,
+        metrics: buildMovementMetrics(row.metrics),
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    const totals = [...ledgerStateMap.values()].reduce((sum, row) => {
+      addMovementTotals(sum, row.metrics);
+      return sum;
+    }, emptyMovementAccumulator());
+
+    return {
+      rows,
+      totals: buildMovementMetrics(totals),
+    };
+  }
+
+  const rows = groups
+    .filter((group) => !group.parentId)
+    .map((group) => {
+      const groupMetrics = [...ledgerStateMap.values()].reduce((sum, row) => {
+        if (isDescendantGroup(row.groupId, group._id)) {
+          addMovementTotals(sum, row.metrics);
+        }
+        return sum;
+      }, emptyMovementAccumulator());
+
+      return {
+        id: String(group._id),
+        name: group.name,
+        secondaryLabel: "",
+        metrics: buildMovementMetrics(groupMetrics),
+        rawMetrics: groupMetrics,
+      };
+    })
+    .filter(
+      (row) =>
+        Number(row.rawMetrics.inwardQty || 0) !== 0 ||
+        Number(row.rawMetrics.outwardQty || 0) !== 0,
+    )
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map(({ rawMetrics, ...row }) => row);
 
   const totals = rows.reduce((sum, row) => {
     addMovementTotals(sum, row.metrics);
@@ -2126,12 +2191,14 @@ async function buildPartyMovementDetailReport(
   companyId,
   fromDate = null,
   toDate = null,
-  { level = "ledger", groupName = "", ledgerName = "" } = {},
+  { level = "ledger", groupId = "", ledgerId = "", groupName = "", ledgerName = "" } = {},
 ) {
+  const requestedGroupId = String(groupId || "").trim();
+  const requestedLedgerId = String(ledgerId || "").trim();
   const requestedGroupName = normalizeName(groupName || "").toLowerCase();
   const requestedLedgerName = normalizeName(ledgerName || "").toLowerCase();
 
-  const [vouchers, ledgers, items] = await Promise.all([
+  const [vouchers, ledgers, items, groups] = await Promise.all([
     Vouchers.find({
       companyId,
       ...(fromDate || toDate
@@ -2148,117 +2215,56 @@ async function buildPartyMovementDetailReport(
       .toArray(),
     Ledgers.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
+    Groups.find({ companyId }).toArray(),
   ]);
 
-  const ledgerMap = new Map(
-    ledgers.map((ledger) => [String(ledger._id), ledger.name]),
-  );
+  const ledgerById = new Map(ledgers.map((ledger) => [String(ledger._id), ledger]));
   const itemMap = new Map(items.map((item) => [String(item._id), item]));
+  const groupById = new Map(groups.map((group) => [String(group._id), group]));
 
-  if (level === "voucher") {
-    const rows = [];
-    let purchaseQty = 0;
-    let purchaseValue = 0;
-    let salesQty = 0;
-    let salesValue = 0;
-
-    vouchers.forEach((voucher) => {
-      const partyMeta = resolveInventoryPartyMeta(voucher, ledgerMap);
-      const voucherGroupName = normalizeName(
-        partyMeta.groupName || "",
-      ).toLowerCase();
-      const voucherLedgerName = normalizeName(
-        partyMeta.ledgerName || "",
-      ).toLowerCase();
-
-      if (requestedGroupName && voucherGroupName !== requestedGroupName) return;
-      if (requestedLedgerName && voucherLedgerName !== requestedLedgerName)
-        return;
-
-      (voucher.inventoryLines || []).forEach((line, index) => {
-        const item = itemMap.get(String(line.itemId)) || {};
-        if (inventoryRoleKey(item.inventoryRole) === "raw_material") return;
-
-        const direction = getInventoryLineDirection(line, voucher.voucherName);
-        if (direction === 0) return;
-
-        const qty = normalizeMoney(Number(line.qty || 0));
-        const rate = normalizeMoney(Number(line.rate || 0));
-        const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
-
-        if (direction > 0) {
-          purchaseQty = normalizeMoney(purchaseQty + qty);
-          purchaseValue = normalizeMoney(purchaseValue + value);
-        } else {
-          salesQty = normalizeMoney(salesQty + qty);
-          salesValue = normalizeMoney(salesValue + value);
-        }
-
-        rows.push({
-          id: `${voucher._id}-${index}`,
-          voucherId: String(voucher._id),
-          date: voucher.date || null,
-          dateLabel: formatDateLabel(voucher.date),
-          voucherName: voucher.voucherName || "Voucher",
-          number:
-            voucher.number ||
-            voucher.invoiceNumber ||
-            voucher.voucherNumber ||
-            "",
-          groupName: partyMeta.groupName || "Unassigned Party",
-          ledgerName: partyMeta.ledgerName || "Unassigned Ledger",
-          itemName:
-            normalizeName(line.itemName || item.name || "") || "Unnamed Item",
-          direction: direction > 0 ? "Purchase" : "Sale",
-          qty,
-          rate,
-          value,
-        });
-      });
-    });
-
-    rows.sort((left, right) => {
-      const leftTime = left.date ? new Date(left.date).getTime() : 0;
-      const rightTime = right.date ? new Date(right.date).getTime() : 0;
-      if (leftTime !== rightTime) return rightTime - leftTime;
-      return left.itemName.localeCompare(right.itemName);
-    });
-
-    return {
-      rows,
-      totals: {
-        purchaseQty,
-        purchaseValue,
-        salesQty,
-        salesValue,
-      },
-    };
+  function getGroupPath(groupIdValue) {
+    const names = [];
+    let current = groupById.get(String(groupIdValue || ""));
+    while (current) {
+      names.unshift(current.name);
+      current = current.parentId ? groupById.get(String(current.parentId)) : null;
+    }
+    return names.join(" / ");
   }
 
-  const accumulator = new Map();
-  let totalPurchaseQty = 0;
-  let totalPurchaseValue = 0;
-  let totalSalesQty = 0;
-  let totalSalesValue = 0;
+  function isDescendantGroup(groupIdValue, ancestorGroupId) {
+    if (!ancestorGroupId) return true;
+    let currentKey = String(groupIdValue || "");
+    const targetKey = String(ancestorGroupId || "");
+    while (currentKey) {
+      if (currentKey === targetKey) return true;
+      const currentGroup = groupById.get(currentKey);
+      currentKey = currentGroup?.parentId ? String(currentGroup.parentId) : "";
+    }
+    return false;
+  }
+
+  const ledgerStateMap = new Map();
 
   vouchers.forEach((voucher) => {
-    const partyMeta = resolveInventoryPartyMeta(voucher, ledgerMap);
-    const voucherGroupName = normalizeName(
-      partyMeta.groupName || "",
-    ).toLowerCase();
-    const voucherLedgerName = normalizeName(
-      partyMeta.ledgerName || "",
-    ).toLowerCase();
+    const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
+    if (!partyLedger) return;
 
-    if (requestedGroupName && voucherGroupName !== requestedGroupName) return;
+    const partyLedgerId = String(partyLedger._id || "");
+    const partyGroupId = String(partyLedger.groupId || "");
+    const partyGroupName = normalizeName(groupById.get(partyGroupId)?.name || "").toLowerCase();
+    const partyLedgerName = normalizeName(partyLedger.name || "").toLowerCase();
 
-    const key =
-      normalizeName(partyMeta.ledgerName || "").toLowerCase() ||
-      "unassigned-ledger";
-    const state = accumulator.get(key) || {
-      id: key,
-      name: partyMeta.ledgerName || "Unassigned Ledger",
-      secondaryLabel: partyMeta.groupName || "",
+    if (requestedGroupId && !isDescendantGroup(partyGroupId, requestedGroupId)) return;
+    if (!requestedGroupId && requestedGroupName && partyGroupName !== requestedGroupName) return;
+    if (requestedLedgerId && partyLedgerId !== requestedLedgerId) return;
+    if (!requestedLedgerId && requestedLedgerName && partyLedgerName !== requestedLedgerName) return;
+
+    const state = ledgerStateMap.get(partyLedgerId) || {
+      id: partyLedgerId,
+      name: partyLedger.name || "Unnamed Ledger",
+      groupId: partyGroupId,
+      groupPath: getGroupPath(partyGroupId),
       metrics: {
         purchaseQty: 0,
         purchaseValue: 0,
@@ -2270,9 +2276,10 @@ async function buildPartyMovementDetailReport(
         lastVoucherOn: null,
       },
       invoiceIds: new Set(),
+      voucherRows: [],
     };
 
-    (voucher.inventoryLines || []).forEach((line) => {
+    (voucher.inventoryLines || []).forEach((line, index) => {
       const item = itemMap.get(String(line.itemId)) || {};
       if (inventoryRoleKey(item.inventoryRole) === "raw_material") return;
 
@@ -2284,63 +2291,200 @@ async function buildPartyMovementDetailReport(
       const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
 
       if (direction > 0) {
-        state.metrics.purchaseQty = normalizeMoney(
-          state.metrics.purchaseQty + qty,
-        );
-        state.metrics.purchaseValue = normalizeMoney(
-          state.metrics.purchaseValue + value,
-        );
-        totalPurchaseQty = normalizeMoney(totalPurchaseQty + qty);
-        totalPurchaseValue = normalizeMoney(totalPurchaseValue + value);
+        state.metrics.purchaseQty = normalizeMoney(state.metrics.purchaseQty + qty);
+        state.metrics.purchaseValue = normalizeMoney(state.metrics.purchaseValue + value);
       } else {
         state.metrics.salesQty = normalizeMoney(state.metrics.salesQty + qty);
-        state.metrics.salesValue = normalizeMoney(
-          state.metrics.salesValue + value,
-        );
-        totalSalesQty = normalizeMoney(totalSalesQty + qty);
-        totalSalesValue = normalizeMoney(totalSalesValue + value);
+        state.metrics.salesValue = normalizeMoney(state.metrics.salesValue + value);
       }
 
       state.invoiceIds.add(String(voucher._id));
       state.metrics.invoiceCount = state.invoiceIds.size;
       state.metrics.lastVoucherOn =
-        !state.metrics.lastVoucherOn ||
-        new Date(voucher.date) > new Date(state.metrics.lastVoucherOn)
+        !state.metrics.lastVoucherOn || new Date(voucher.date) > new Date(state.metrics.lastVoucherOn)
           ? voucher.date
           : state.metrics.lastVoucherOn;
       state.metrics.averagePurchaseRate =
         state.metrics.purchaseQty !== 0
-          ? normalizeMoney(
-              state.metrics.purchaseValue / state.metrics.purchaseQty,
-            )
+          ? normalizeMoney(state.metrics.purchaseValue / state.metrics.purchaseQty)
           : 0;
       state.metrics.averageSaleRate =
         state.metrics.salesQty !== 0
           ? normalizeMoney(state.metrics.salesValue / state.metrics.salesQty)
           : 0;
+
+      state.voucherRows.push({
+        id: `${voucher._id}-${index}`,
+        voucherId: String(voucher._id),
+        date: voucher.date || null,
+        dateLabel: formatDateLabel(voucher.date),
+        voucherName: voucher.voucherName || "Voucher",
+        number:
+          voucher.number ||
+          voucher.invoiceNumber ||
+          voucher.voucherNumber ||
+          "",
+        groupName: groupById.get(partyGroupId)?.name || "Unassigned Group",
+        ledgerName: partyLedger.name || "Unassigned Ledger",
+        itemName: normalizeName(line.itemName || item.name || "") || "Unnamed Item",
+        direction: direction > 0 ? "Purchase" : "Sale",
+        qty,
+        rate,
+        value,
+      });
     });
 
-    accumulator.set(key, state);
+    ledgerStateMap.set(partyLedgerId, state);
   });
 
-  const rows = [...accumulator.values()]
+  if (level === "voucher") {
+    const targetState = requestedLedgerId
+      ? ledgerStateMap.get(requestedLedgerId)
+      : [...ledgerStateMap.values()].find(
+          (row) => normalizeName(row.name || "").toLowerCase() === requestedLedgerName,
+        );
+
+    const rows = (targetState?.voucherRows || []).slice().sort((left, right) => {
+      const leftTime = left.date ? new Date(left.date).getTime() : 0;
+      const rightTime = right.date ? new Date(right.date).getTime() : 0;
+      if (leftTime !== rightTime) return rightTime - leftTime;
+      return left.itemName.localeCompare(right.itemName);
+    });
+
+    const totals = rows.reduce(
+      (sum, row) => {
+        if (row.direction === "Purchase") {
+          sum.purchaseQty = normalizeMoney(sum.purchaseQty + Number(row.qty || 0));
+          sum.purchaseValue = normalizeMoney(sum.purchaseValue + Number(row.value || 0));
+        } else {
+          sum.salesQty = normalizeMoney(sum.salesQty + Number(row.qty || 0));
+          sum.salesValue = normalizeMoney(sum.salesValue + Number(row.value || 0));
+        }
+        return sum;
+      },
+      { purchaseQty: 0, purchaseValue: 0, salesQty: 0, salesValue: 0 },
+    );
+
+    return { rows, totals };
+  }
+
+  if (level === "group") {
+    const rows = [];
+    const childGroups = groups
+      .filter((group) =>
+        requestedGroupId
+          ? String(group.parentId || "") === requestedGroupId
+          : !group.parentId,
+      )
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    childGroups.forEach((group) => {
+      const rawMetrics = [...ledgerStateMap.values()].reduce(
+        (sum, ledgerState) => {
+          if (isDescendantGroup(ledgerState.groupId, group._id)) {
+            sum.purchaseQty = normalizeMoney(sum.purchaseQty + Number(ledgerState.metrics.purchaseQty || 0));
+            sum.purchaseValue = normalizeMoney(sum.purchaseValue + Number(ledgerState.metrics.purchaseValue || 0));
+            sum.salesQty = normalizeMoney(sum.salesQty + Number(ledgerState.metrics.salesQty || 0));
+            sum.salesValue = normalizeMoney(sum.salesValue + Number(ledgerState.metrics.salesValue || 0));
+            sum.invoiceCount += Number(ledgerState.metrics.invoiceCount || 0);
+            sum.lastVoucherOn =
+              !sum.lastVoucherOn ||
+              (ledgerState.metrics.lastVoucherOn && new Date(ledgerState.metrics.lastVoucherOn) > new Date(sum.lastVoucherOn))
+                ? ledgerState.metrics.lastVoucherOn
+                : sum.lastVoucherOn;
+          }
+          return sum;
+        },
+        {
+          purchaseQty: 0,
+          purchaseValue: 0,
+          salesQty: 0,
+          salesValue: 0,
+          invoiceCount: 0,
+          averagePurchaseRate: 0,
+          averageSaleRate: 0,
+          lastVoucherOn: null,
+        },
+      );
+
+      rawMetrics.averagePurchaseRate =
+        rawMetrics.purchaseQty !== 0
+          ? normalizeMoney(rawMetrics.purchaseValue / rawMetrics.purchaseQty)
+          : 0;
+      rawMetrics.averageSaleRate =
+        rawMetrics.salesQty !== 0
+          ? normalizeMoney(rawMetrics.salesValue / rawMetrics.salesQty)
+          : 0;
+
+      if (
+        rawMetrics.purchaseQty !== 0 ||
+        rawMetrics.salesQty !== 0 ||
+        rawMetrics.purchaseValue !== 0 ||
+        rawMetrics.salesValue !== 0
+      ) {
+        rows.push({
+          id: String(group._id),
+          name: group.name,
+          rowType: "group",
+          secondaryLabel: getGroupPath(group.parentId),
+          metrics: rawMetrics,
+        });
+      }
+    });
+
+    [...ledgerStateMap.values()]
+      .filter((ledgerState) =>
+        requestedGroupId
+          ? String(ledgerState.groupId || "") === requestedGroupId
+          : false,
+      )
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .forEach((ledgerState) => {
+        rows.push({
+          id: ledgerState.id,
+          name: ledgerState.name,
+          rowType: "ledger",
+          secondaryLabel: getGroupPath(ledgerState.groupId),
+          metrics: ledgerState.metrics,
+        });
+      });
+
+    const totals = rows.reduce(
+      (sum, row) => {
+        sum.purchaseQty = normalizeMoney(sum.purchaseQty + Number(row.metrics.purchaseQty || 0));
+        sum.purchaseValue = normalizeMoney(sum.purchaseValue + Number(row.metrics.purchaseValue || 0));
+        sum.salesQty = normalizeMoney(sum.salesQty + Number(row.metrics.salesQty || 0));
+        sum.salesValue = normalizeMoney(sum.salesValue + Number(row.metrics.salesValue || 0));
+        return sum;
+      },
+      { purchaseQty: 0, purchaseValue: 0, salesQty: 0, salesValue: 0 },
+    );
+
+    return { rows, totals };
+  }
+
+  const rows = [...ledgerStateMap.values()]
     .map((row) => ({
       id: row.id,
       name: row.name,
-      secondaryLabel: row.secondaryLabel,
+      rowType: "ledger",
+      secondaryLabel: row.groupPath,
       metrics: row.metrics,
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
 
-  return {
-    rows,
-    totals: {
-      purchaseQty: totalPurchaseQty,
-      purchaseValue: totalPurchaseValue,
-      salesQty: totalSalesQty,
-      salesValue: totalSalesValue,
+  const totals = rows.reduce(
+    (sum, row) => {
+      sum.purchaseQty = normalizeMoney(sum.purchaseQty + Number(row.metrics.purchaseQty || 0));
+      sum.purchaseValue = normalizeMoney(sum.purchaseValue + Number(row.metrics.purchaseValue || 0));
+      sum.salesQty = normalizeMoney(sum.salesQty + Number(row.metrics.salesQty || 0));
+      sum.salesValue = normalizeMoney(sum.salesValue + Number(row.metrics.salesValue || 0));
+      return sum;
     },
-  };
+    { purchaseQty: 0, purchaseValue: 0, salesQty: 0, salesValue: 0 },
+  );
+
+  return { rows, totals };
 }
 
 async function buildStockGroupSummary(
@@ -6334,6 +6478,8 @@ app.get(
         toDate,
         {
           level,
+          groupId: req.query.groupId || "",
+          ledgerId: req.query.ledgerId || "",
           groupName: req.query.groupName || "",
           ledgerName: req.query.ledgerName || "",
         },
