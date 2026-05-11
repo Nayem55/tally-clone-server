@@ -738,6 +738,36 @@ function flattenGroupTree(tree, level = 0) {
   return rows;
 }
 
+function findGroupNodeById(tree, targetId) {
+  for (const node of tree || []) {
+    if (String(node.id) === String(targetId)) return node;
+    const nested = findGroupNodeById(node.children || [], targetId);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function balanceValueFromSplit(source = {}) {
+  return normalizeMoney(
+    Math.max(Number(source.closingDebit || 0), Number(source.closingCredit || 0)),
+  );
+}
+
+function buildGroupTrailLabel(groupsById, groupId) {
+  if (!groupId) return "";
+  const names = [];
+  let cursor = groupsById.get(String(groupId));
+  const visited = new Set();
+
+  while (cursor && !visited.has(String(cursor._id))) {
+    names.unshift(cursor.name);
+    visited.add(String(cursor._id));
+    cursor = cursor.parentId ? groupsById.get(String(cursor.parentId)) : null;
+  }
+
+  return names.join(" / ");
+}
+
 function formatDateLabel(value) {
   if (!value) return "";
   const date = new Date(value);
@@ -5377,6 +5407,146 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
   } catch (err) {
     console.error("Error building trial balance:", err);
     res.status(500).json({ message: "Error building trial balance" });
+  }
+});
+
+app.get("/companies/:companyId/reports/account-books-summary", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await ensureCompanyCoreMasters(companyId);
+
+    const mode = String(req.query.mode || "group").toLowerCase() === "ledger"
+      ? "ledger"
+      : "group";
+    const fromDate = safeDate(req.query.from);
+    const toDate = safeDate(req.query.to);
+    const groupIdText = String(req.query.groupId || "");
+    const selectedGroupId = ObjectId.isValid(groupIdText) ? groupIdText : "";
+
+    const [groups, ledgers, vouchers] = await Promise.all([
+      Groups.find({ companyId }).toArray(),
+      Ledgers.aggregate([
+        { $match: { companyId } },
+        {
+          $lookup: {
+            from: "groups",
+            localField: "groupId",
+            foreignField: "_id",
+            as: "group",
+          },
+        },
+        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+      ]).toArray(),
+      Vouchers.find(toDate ? { companyId, date: { $lte: toDate } } : { companyId }).toArray(),
+    ]);
+
+    const groupsById = new Map(groups.map((group) => [String(group._id), group]));
+    const ledgerBalances = summarizeLedgerBalances(ledgers, vouchers, fromDate, toDate)
+      .map((ledger) => ({
+        ...ledger,
+        value: balanceValueFromSplit(ledger),
+        groupName: ledger.group?.name || "",
+        groupTrail: buildGroupTrailLabel(groupsById, ledger.groupId),
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    const tree = buildGroupedBalanceTree(
+      groups,
+      ledgerBalances.map((ledger) => ({
+        _id: ledger._id,
+        name: ledger.name,
+        groupId: ledger.groupId,
+        openingDebit: ledger.openingDebit,
+        openingCredit: ledger.openingCredit,
+        debit: ledger.debit,
+        credit: ledger.credit,
+        closingDebit: ledger.closingDebit,
+        closingCredit: ledger.closingCredit,
+      })),
+    );
+
+    if (mode === "ledger") {
+      const rows = ledgerBalances.map((ledger) => ({
+        id: ledger._id,
+        name: ledger.name,
+        rowType: "ledger",
+        value: ledger.value,
+        groupId: ledger.groupId || null,
+        groupName: ledger.groupName,
+        groupTrail: ledger.groupTrail,
+      }));
+
+      return res.json({
+        mode,
+        rows,
+        totals: {
+          count: rows.length,
+          value: rows.reduce(
+            (sum, row) => normalizeMoney(sum + Number(row.value || 0)),
+            0,
+          ),
+        },
+        trail: [],
+      });
+    }
+
+    const selectedGroup = selectedGroupId ? findGroupNodeById(tree, selectedGroupId) : null;
+    const rows = selectedGroup
+      ? [
+          ...(selectedGroup.children || []).map((group) => ({
+            id: group.id,
+            name: group.name,
+            rowType: "group",
+            value: balanceValueFromSplit(group.totals),
+          })),
+          ...((selectedGroup.ledgers || []).map((ledger) => ({
+            id: ledger.id,
+            name: ledger.name,
+            rowType: "ledger",
+            value: balanceValueFromSplit(ledger.totals),
+            groupId: ledger.groupId || null,
+            groupName: ledger.groupName || "",
+            groupTrail: buildGroupTrailLabel(groupsById, ledger.groupId),
+          })) || []),
+        ]
+      : (tree || []).map((group) => ({
+          id: group.id,
+          name: group.name,
+          rowType: "group",
+          value: balanceValueFromSplit(group.totals),
+        }));
+
+    const trail = [];
+    if (selectedGroupId) {
+      let cursor = groupsById.get(selectedGroupId);
+      const visited = new Set();
+      while (cursor && !visited.has(String(cursor._id))) {
+        trail.unshift({
+          id: String(cursor._id),
+          name: cursor.name,
+        });
+        visited.add(String(cursor._id));
+        cursor = cursor.parentId ? groupsById.get(String(cursor.parentId)) : null;
+      }
+    }
+
+    res.json({
+      mode,
+      rows,
+      totals: {
+        count: rows.length,
+        value: rows.reduce(
+          (sum, row) => normalizeMoney(sum + Number(row.value || 0)),
+          0,
+        ),
+      },
+      trail,
+      currentGroupId: selectedGroupId || "",
+      currentGroupName: selectedGroup?.name || "",
+    });
+  } catch (err) {
+    console.error("Error building account books summary:", err);
+    res.status(500).json({ message: "Error building account books summary" });
   }
 });
 
