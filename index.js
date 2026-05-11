@@ -224,6 +224,11 @@ function voucherMatchesSalesPerson(voucher = {}, salesPersonId = "") {
   );
 }
 
+function isSalesPersonTrackedVoucherName(value = "") {
+  const key = normalizeName(value || "").toLowerCase();
+  return key === "sales" || key === "pos voucher";
+}
+
 function formatProductionNumber(companyName = "", currentCount = 0) {
   const companySlug = slugifySegment(companyName || "company") || "company";
   return `${companySlug}-manufacturing-${String(currentCount + 1).padStart(
@@ -749,7 +754,10 @@ function findGroupNodeById(tree, targetId) {
 
 function balanceValueFromSplit(source = {}) {
   return normalizeMoney(
-    Math.max(Number(source.closingDebit || 0), Number(source.closingCredit || 0)),
+    Math.max(
+      Number(source.closingDebit || 0),
+      Number(source.closingCredit || 0),
+    ),
   );
 }
 
@@ -1222,7 +1230,7 @@ async function buildInventoryDetailReport(
     })
     .forEach((voucher) => {
       if (requestedSalesPersonId) {
-        if (!/^sales$/i.test(String(voucher.voucherName || ""))) return;
+        if (!isSalesPersonTrackedVoucherName(voucher.voucherName)) return;
         if (!voucherMatchesSalesPerson(voucher, requestedSalesPersonId)) return;
       }
       if (!Array.isArray(voucher.inventoryLines)) return;
@@ -1550,8 +1558,8 @@ function resolveInventoryPartyLedger(voucher, ledgerById) {
     direction > 0
       ? lines.filter((line) => Number(line.credit || 0) > 0)
       : direction < 0
-        ? lines.filter((line) => Number(line.debit || 0) > 0)
-        : lines;
+      ? lines.filter((line) => Number(line.debit || 0) > 0)
+      : lines;
 
   return (
     preferredLines
@@ -1578,7 +1586,6 @@ async function buildInventoryMovementDimensionReport(
   if (dimension === "sales-person") {
     const vouchers = await Vouchers.find({
       companyId,
-      voucherName: { $regex: "^Sales$", $options: "i" },
       ...(fromDate || toDate
         ? {
             date: {
@@ -1593,65 +1600,69 @@ async function buildInventoryMovementDimensionReport(
 
     const accumulator = new Map();
 
-    vouchers.forEach((voucher) => {
-      const salesMeta = voucher.salesMeta || {};
-      const key = salesPersonKeyFromMeta(salesMeta);
-      const employeeName =
-        normalizeName(salesMeta.employeeName || "") || "Unassigned";
-      const employeeNumber = normalizeTextBlock(salesMeta.employeeNumber || "");
-      const department = normalizeTextBlock(salesMeta.department || "");
-      const designation = normalizeTextBlock(salesMeta.designation || "");
-      const state = accumulator.get(key) || {
-        id: key,
-        name: employeeName,
-        secondaryLabel:
-          [employeeNumber, department || designation]
-            .filter(Boolean)
-            .join(" | ") || "Sales employee",
-        metrics: {
-          salesQty: 0,
-          salesValue: 0,
-          invoiceCount: 0,
-          customerCount: 0,
-          lastSaleOn: null,
-        },
-      };
-      const customerKey = normalizeTextBlock(
-        voucher.customerSnapshot?.phone ||
-          voucher.customerSnapshot?.name ||
-          voucher.lines?.[0]?.ledgerId ||
-          "",
-      );
-      const customerSet = state.customerSet || new Set();
-      if (customerKey) {
-        customerSet.add(customerKey);
-      }
+    vouchers
+      .filter((voucher) => isSalesPersonTrackedVoucherName(voucher.voucherName))
+      .forEach((voucher) => {
+        const salesMeta = voucher.salesMeta || {};
+        const key = salesPersonKeyFromMeta(salesMeta);
+        const employeeName =
+          normalizeName(salesMeta.employeeName || "") || "Unassigned";
+        const employeeNumber = normalizeTextBlock(
+          salesMeta.employeeNumber || "",
+        );
+        const department = normalizeTextBlock(salesMeta.department || "");
+        const designation = normalizeTextBlock(salesMeta.designation || "");
+        const state = accumulator.get(key) || {
+          id: key,
+          name: employeeName,
+          secondaryLabel:
+            [employeeNumber, department || designation]
+              .filter(Boolean)
+              .join(" | ") || "Sales employee",
+          metrics: {
+            salesQty: 0,
+            salesValue: 0,
+            invoiceCount: 0,
+            customerCount: 0,
+            lastSaleOn: null,
+          },
+        };
+        const customerKey = normalizeTextBlock(
+          voucher.customerSnapshot?.phone ||
+            voucher.customerSnapshot?.name ||
+            voucher.lines?.[0]?.ledgerId ||
+            "",
+        );
+        const customerSet = state.customerSet || new Set();
+        if (customerKey) {
+          customerSet.add(customerKey);
+        }
 
-      const itemTotals = (voucher.inventoryLines || []).reduce(
-        (sum, line) => ({
-          salesQty: normalizeMoney(sum.salesQty + Number(line.qty || 0)),
-          salesValue: 0,
-        }),
-        { salesQty: 0, salesValue: 0 },
-      );
-      const voucherSalesValue = voucherTotalAmount(voucher);
+        const itemTotals = (voucher.inventoryLines || []).reduce(
+          (sum, line) => ({
+            salesQty: normalizeMoney(sum.salesQty + Number(line.qty || 0)),
+            salesValue: 0,
+          }),
+          { salesQty: 0, salesValue: 0 },
+        );
+        const voucherSalesValue = voucherTotalAmount(voucher);
 
-      state.metrics.salesQty = normalizeMoney(
-        state.metrics.salesQty + itemTotals.salesQty,
-      );
-      state.metrics.salesValue = normalizeMoney(
-        state.metrics.salesValue + voucherSalesValue,
-      );
-      state.metrics.invoiceCount += 1;
-      state.metrics.customerCount = customerSet.size;
-      state.metrics.lastSaleOn =
-        !state.metrics.lastSaleOn ||
-        new Date(voucher.date) > new Date(state.metrics.lastSaleOn)
-          ? voucher.date
-          : state.metrics.lastSaleOn;
-      state.customerSet = customerSet;
-      accumulator.set(key, state);
-    });
+        state.metrics.salesQty = normalizeMoney(
+          state.metrics.salesQty + itemTotals.salesQty,
+        );
+        state.metrics.salesValue = normalizeMoney(
+          state.metrics.salesValue + voucherSalesValue,
+        );
+        state.metrics.invoiceCount += 1;
+        state.metrics.customerCount = customerSet.size;
+        state.metrics.lastSaleOn =
+          !state.metrics.lastSaleOn ||
+          new Date(voucher.date) > new Date(state.metrics.lastSaleOn)
+            ? voucher.date
+            : state.metrics.lastSaleOn;
+        state.customerSet = customerSet;
+        accumulator.set(key, state);
+      });
 
     const rows = [...accumulator.values()]
       .map((row) => {
@@ -1796,7 +1807,9 @@ async function buildInventoryMovementDimensionReport(
   const ledgerMap = new Map(
     ledgers.map((ledger) => [String(ledger._id), ledger.name]),
   );
-  const ledgerById = new Map(ledgers.map((ledger) => [String(ledger._id), ledger]));
+  const ledgerById = new Map(
+    ledgers.map((ledger) => [String(ledger._id), ledger]),
+  );
   const itemMap = new Map(items.map((item) => [String(item._id), item]));
   const groupById = new Map(groups.map((group) => [String(group._id), group]));
   const ledgerStateMap = new Map();
@@ -1806,7 +1819,9 @@ async function buildInventoryMovementDimensionReport(
     let current = groupById.get(String(groupId || ""));
     while (current) {
       names.unshift(current.name);
-      current = current.parentId ? groupById.get(String(current.parentId)) : null;
+      current = current.parentId
+        ? groupById.get(String(current.parentId))
+        : null;
     }
     return names.join(" / ");
   }
@@ -1895,7 +1910,6 @@ async function buildInventoryMovementDimensionReport(
             );
           }
         }
-
       });
 
       ledgerStateMap.set(ledgerKey, state);
@@ -1993,7 +2007,6 @@ async function buildSalesPersonDrillReport(
     Items.find({ companyId }).toArray(),
     Vouchers.find({
       companyId,
-      voucherName: { $regex: "^Sales$", $options: "i" },
       ...(fromDate || toDate
         ? {
             date: {
@@ -2009,8 +2022,10 @@ async function buildSalesPersonDrillReport(
 
   const itemById = new Map(items.map((item) => [String(item._id), item]));
   const groupById = new Map(groups.map((group) => [String(group._id), group]));
-  const salesVouchers = vouchers.filter((voucher) =>
-    voucherMatchesSalesPerson(voucher, requestedSalesPersonId),
+  const salesVouchers = vouchers.filter(
+    (voucher) =>
+      isSalesPersonTrackedVoucherName(voucher.voucherName) &&
+      voucherMatchesSalesPerson(voucher, requestedSalesPersonId),
   );
 
   const customerKeyOfVoucher = (voucher = {}) =>
@@ -2221,7 +2236,13 @@ async function buildPartyMovementDetailReport(
   companyId,
   fromDate = null,
   toDate = null,
-  { level = "ledger", groupId = "", ledgerId = "", groupName = "", ledgerName = "" } = {},
+  {
+    level = "ledger",
+    groupId = "",
+    ledgerId = "",
+    groupName = "",
+    ledgerName = "",
+  } = {},
 ) {
   const requestedGroupId = String(groupId || "").trim();
   const requestedLedgerId = String(ledgerId || "").trim();
@@ -2248,7 +2269,9 @@ async function buildPartyMovementDetailReport(
     Groups.find({ companyId }).toArray(),
   ]);
 
-  const ledgerById = new Map(ledgers.map((ledger) => [String(ledger._id), ledger]));
+  const ledgerById = new Map(
+    ledgers.map((ledger) => [String(ledger._id), ledger]),
+  );
   const itemMap = new Map(items.map((item) => [String(item._id), item]));
   const groupById = new Map(groups.map((group) => [String(group._id), group]));
 
@@ -2257,7 +2280,9 @@ async function buildPartyMovementDetailReport(
     let current = groupById.get(String(groupIdValue || ""));
     while (current) {
       names.unshift(current.name);
-      current = current.parentId ? groupById.get(String(current.parentId)) : null;
+      current = current.parentId
+        ? groupById.get(String(current.parentId))
+        : null;
     }
     return names.join(" / ");
   }
@@ -2282,13 +2307,26 @@ async function buildPartyMovementDetailReport(
 
     const partyLedgerId = String(partyLedger._id || "");
     const partyGroupId = String(partyLedger.groupId || "");
-    const partyGroupName = normalizeName(groupById.get(partyGroupId)?.name || "").toLowerCase();
+    const partyGroupName = normalizeName(
+      groupById.get(partyGroupId)?.name || "",
+    ).toLowerCase();
     const partyLedgerName = normalizeName(partyLedger.name || "").toLowerCase();
 
-    if (requestedGroupId && !isDescendantGroup(partyGroupId, requestedGroupId)) return;
-    if (!requestedGroupId && requestedGroupName && partyGroupName !== requestedGroupName) return;
+    if (requestedGroupId && !isDescendantGroup(partyGroupId, requestedGroupId))
+      return;
+    if (
+      !requestedGroupId &&
+      requestedGroupName &&
+      partyGroupName !== requestedGroupName
+    )
+      return;
     if (requestedLedgerId && partyLedgerId !== requestedLedgerId) return;
-    if (!requestedLedgerId && requestedLedgerName && partyLedgerName !== requestedLedgerName) return;
+    if (
+      !requestedLedgerId &&
+      requestedLedgerName &&
+      partyLedgerName !== requestedLedgerName
+    )
+      return;
 
     const state = ledgerStateMap.get(partyLedgerId) || {
       id: partyLedgerId,
@@ -2321,22 +2359,31 @@ async function buildPartyMovementDetailReport(
       const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
 
       if (direction > 0) {
-        state.metrics.purchaseQty = normalizeMoney(state.metrics.purchaseQty + qty);
-        state.metrics.purchaseValue = normalizeMoney(state.metrics.purchaseValue + value);
+        state.metrics.purchaseQty = normalizeMoney(
+          state.metrics.purchaseQty + qty,
+        );
+        state.metrics.purchaseValue = normalizeMoney(
+          state.metrics.purchaseValue + value,
+        );
       } else {
         state.metrics.salesQty = normalizeMoney(state.metrics.salesQty + qty);
-        state.metrics.salesValue = normalizeMoney(state.metrics.salesValue + value);
+        state.metrics.salesValue = normalizeMoney(
+          state.metrics.salesValue + value,
+        );
       }
 
       state.invoiceIds.add(String(voucher._id));
       state.metrics.invoiceCount = state.invoiceIds.size;
       state.metrics.lastVoucherOn =
-        !state.metrics.lastVoucherOn || new Date(voucher.date) > new Date(state.metrics.lastVoucherOn)
+        !state.metrics.lastVoucherOn ||
+        new Date(voucher.date) > new Date(state.metrics.lastVoucherOn)
           ? voucher.date
           : state.metrics.lastVoucherOn;
       state.metrics.averagePurchaseRate =
         state.metrics.purchaseQty !== 0
-          ? normalizeMoney(state.metrics.purchaseValue / state.metrics.purchaseQty)
+          ? normalizeMoney(
+              state.metrics.purchaseValue / state.metrics.purchaseQty,
+            )
           : 0;
       state.metrics.averageSaleRate =
         state.metrics.salesQty !== 0
@@ -2356,7 +2403,8 @@ async function buildPartyMovementDetailReport(
           "",
         groupName: groupById.get(partyGroupId)?.name || "Unassigned Group",
         ledgerName: partyLedger.name || "Unassigned Ledger",
-        itemName: normalizeName(line.itemName || item.name || "") || "Unnamed Item",
+        itemName:
+          normalizeName(line.itemName || item.name || "") || "Unnamed Item",
         direction: direction > 0 ? "Purchase" : "Sale",
         qty,
         rate,
@@ -2371,24 +2419,33 @@ async function buildPartyMovementDetailReport(
     const targetState = requestedLedgerId
       ? ledgerStateMap.get(requestedLedgerId)
       : [...ledgerStateMap.values()].find(
-          (row) => normalizeName(row.name || "").toLowerCase() === requestedLedgerName,
+          (row) =>
+            normalizeName(row.name || "").toLowerCase() === requestedLedgerName,
         );
 
-    const rows = (targetState?.voucherRows || []).slice().sort((left, right) => {
-      const leftTime = left.date ? new Date(left.date).getTime() : 0;
-      const rightTime = right.date ? new Date(right.date).getTime() : 0;
-      if (leftTime !== rightTime) return rightTime - leftTime;
-      return left.itemName.localeCompare(right.itemName);
-    });
+    const rows = (targetState?.voucherRows || [])
+      .slice()
+      .sort((left, right) => {
+        const leftTime = left.date ? new Date(left.date).getTime() : 0;
+        const rightTime = right.date ? new Date(right.date).getTime() : 0;
+        if (leftTime !== rightTime) return rightTime - leftTime;
+        return left.itemName.localeCompare(right.itemName);
+      });
 
     const totals = rows.reduce(
       (sum, row) => {
         if (row.direction === "Purchase") {
-          sum.purchaseQty = normalizeMoney(sum.purchaseQty + Number(row.qty || 0));
-          sum.purchaseValue = normalizeMoney(sum.purchaseValue + Number(row.value || 0));
+          sum.purchaseQty = normalizeMoney(
+            sum.purchaseQty + Number(row.qty || 0),
+          );
+          sum.purchaseValue = normalizeMoney(
+            sum.purchaseValue + Number(row.value || 0),
+          );
         } else {
           sum.salesQty = normalizeMoney(sum.salesQty + Number(row.qty || 0));
-          sum.salesValue = normalizeMoney(sum.salesValue + Number(row.value || 0));
+          sum.salesValue = normalizeMoney(
+            sum.salesValue + Number(row.value || 0),
+          );
         }
         return sum;
       },
@@ -2412,14 +2469,25 @@ async function buildPartyMovementDetailReport(
       const rawMetrics = [...ledgerStateMap.values()].reduce(
         (sum, ledgerState) => {
           if (isDescendantGroup(ledgerState.groupId, group._id)) {
-            sum.purchaseQty = normalizeMoney(sum.purchaseQty + Number(ledgerState.metrics.purchaseQty || 0));
-            sum.purchaseValue = normalizeMoney(sum.purchaseValue + Number(ledgerState.metrics.purchaseValue || 0));
-            sum.salesQty = normalizeMoney(sum.salesQty + Number(ledgerState.metrics.salesQty || 0));
-            sum.salesValue = normalizeMoney(sum.salesValue + Number(ledgerState.metrics.salesValue || 0));
+            sum.purchaseQty = normalizeMoney(
+              sum.purchaseQty + Number(ledgerState.metrics.purchaseQty || 0),
+            );
+            sum.purchaseValue = normalizeMoney(
+              sum.purchaseValue +
+                Number(ledgerState.metrics.purchaseValue || 0),
+            );
+            sum.salesQty = normalizeMoney(
+              sum.salesQty + Number(ledgerState.metrics.salesQty || 0),
+            );
+            sum.salesValue = normalizeMoney(
+              sum.salesValue + Number(ledgerState.metrics.salesValue || 0),
+            );
             sum.invoiceCount += Number(ledgerState.metrics.invoiceCount || 0);
             sum.lastVoucherOn =
               !sum.lastVoucherOn ||
-              (ledgerState.metrics.lastVoucherOn && new Date(ledgerState.metrics.lastVoucherOn) > new Date(sum.lastVoucherOn))
+              (ledgerState.metrics.lastVoucherOn &&
+                new Date(ledgerState.metrics.lastVoucherOn) >
+                  new Date(sum.lastVoucherOn))
                 ? ledgerState.metrics.lastVoucherOn
                 : sum.lastVoucherOn;
           }
@@ -2481,10 +2549,18 @@ async function buildPartyMovementDetailReport(
 
     const totals = rows.reduce(
       (sum, row) => {
-        sum.purchaseQty = normalizeMoney(sum.purchaseQty + Number(row.metrics.purchaseQty || 0));
-        sum.purchaseValue = normalizeMoney(sum.purchaseValue + Number(row.metrics.purchaseValue || 0));
-        sum.salesQty = normalizeMoney(sum.salesQty + Number(row.metrics.salesQty || 0));
-        sum.salesValue = normalizeMoney(sum.salesValue + Number(row.metrics.salesValue || 0));
+        sum.purchaseQty = normalizeMoney(
+          sum.purchaseQty + Number(row.metrics.purchaseQty || 0),
+        );
+        sum.purchaseValue = normalizeMoney(
+          sum.purchaseValue + Number(row.metrics.purchaseValue || 0),
+        );
+        sum.salesQty = normalizeMoney(
+          sum.salesQty + Number(row.metrics.salesQty || 0),
+        );
+        sum.salesValue = normalizeMoney(
+          sum.salesValue + Number(row.metrics.salesValue || 0),
+        );
         return sum;
       },
       { purchaseQty: 0, purchaseValue: 0, salesQty: 0, salesValue: 0 },
@@ -2505,10 +2581,18 @@ async function buildPartyMovementDetailReport(
 
   const totals = rows.reduce(
     (sum, row) => {
-      sum.purchaseQty = normalizeMoney(sum.purchaseQty + Number(row.metrics.purchaseQty || 0));
-      sum.purchaseValue = normalizeMoney(sum.purchaseValue + Number(row.metrics.purchaseValue || 0));
-      sum.salesQty = normalizeMoney(sum.salesQty + Number(row.metrics.salesQty || 0));
-      sum.salesValue = normalizeMoney(sum.salesValue + Number(row.metrics.salesValue || 0));
+      sum.purchaseQty = normalizeMoney(
+        sum.purchaseQty + Number(row.metrics.purchaseQty || 0),
+      );
+      sum.purchaseValue = normalizeMoney(
+        sum.purchaseValue + Number(row.metrics.purchaseValue || 0),
+      );
+      sum.salesQty = normalizeMoney(
+        sum.salesQty + Number(row.metrics.salesQty || 0),
+      );
+      sum.salesValue = normalizeMoney(
+        sum.salesValue + Number(row.metrics.salesValue || 0),
+      );
       return sum;
     },
     { purchaseQty: 0, purchaseValue: 0, salesQty: 0, salesValue: 0 },
@@ -4106,6 +4190,7 @@ app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
       date,
       narration,
       customer,
+      salesMeta,
       salesLedgerId,
       payments = {},
       discountType = "fixed",
@@ -4321,6 +4406,11 @@ app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
       },
       createdAt: new Date(),
     };
+
+    const normalizedSalesMeta = normalizeSalesMeta(salesMeta);
+    if (normalizedSalesMeta) {
+      doc.salesMeta = normalizedSalesMeta;
+    }
 
     const result = await Vouchers.insertOne(doc);
     res
@@ -5410,73 +5500,143 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
   }
 });
 
-app.get("/companies/:companyId/reports/account-books-summary", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
+app.get(
+  "/companies/:companyId/reports/account-books-summary",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await ensureCompanyCoreMasters(companyId);
 
-    const mode = String(req.query.mode || "group").toLowerCase() === "ledger"
-      ? "ledger"
-      : "group";
-    const fromDate = safeDate(req.query.from);
-    const toDate = safeDate(req.query.to);
-    const groupIdText = String(req.query.groupId || "");
-    const selectedGroupId = ObjectId.isValid(groupIdText) ? groupIdText : "";
+      const mode =
+        String(req.query.mode || "group").toLowerCase() === "ledger"
+          ? "ledger"
+          : "group";
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
+      const groupIdText = String(req.query.groupId || "");
+      const selectedGroupId = ObjectId.isValid(groupIdText) ? groupIdText : "";
 
-    const [groups, ledgers, vouchers] = await Promise.all([
-      Groups.find({ companyId }).toArray(),
-      Ledgers.aggregate([
-        { $match: { companyId } },
-        {
-          $lookup: {
-            from: "groups",
-            localField: "groupId",
-            foreignField: "_id",
-            as: "group",
+      const [groups, ledgers, vouchers] = await Promise.all([
+        Groups.find({ companyId }).toArray(),
+        Ledgers.aggregate([
+          { $match: { companyId } },
+          {
+            $lookup: {
+              from: "groups",
+              localField: "groupId",
+              foreignField: "_id",
+              as: "group",
+            },
           },
-        },
-        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
-      ]).toArray(),
-      Vouchers.find(toDate ? { companyId, date: { $lte: toDate } } : { companyId }).toArray(),
-    ]);
+          { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+        ]).toArray(),
+        Vouchers.find(
+          toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+        ).toArray(),
+      ]);
 
-    const groupsById = new Map(groups.map((group) => [String(group._id), group]));
-    const ledgerBalances = summarizeLedgerBalances(ledgers, vouchers, fromDate, toDate)
-      .map((ledger) => ({
-        ...ledger,
-        value: balanceValueFromSplit(ledger),
-        groupName: ledger.group?.name || "",
-        groupTrail: buildGroupTrailLabel(groupsById, ledger.groupId),
-      }))
-      .sort((left, right) => left.name.localeCompare(right.name));
+      const groupsById = new Map(
+        groups.map((group) => [String(group._id), group]),
+      );
+      const ledgerBalances = summarizeLedgerBalances(
+        ledgers,
+        vouchers,
+        fromDate,
+        toDate,
+      )
+        .map((ledger) => ({
+          ...ledger,
+          value: balanceValueFromSplit(ledger),
+          groupName: ledger.group?.name || "",
+          groupTrail: buildGroupTrailLabel(groupsById, ledger.groupId),
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
 
-    const tree = buildGroupedBalanceTree(
-      groups,
-      ledgerBalances.map((ledger) => ({
-        _id: ledger._id,
-        name: ledger.name,
-        groupId: ledger.groupId,
-        openingDebit: ledger.openingDebit,
-        openingCredit: ledger.openingCredit,
-        debit: ledger.debit,
-        credit: ledger.credit,
-        closingDebit: ledger.closingDebit,
-        closingCredit: ledger.closingCredit,
-      })),
-    );
+      const tree = buildGroupedBalanceTree(
+        groups,
+        ledgerBalances.map((ledger) => ({
+          _id: ledger._id,
+          name: ledger.name,
+          groupId: ledger.groupId,
+          openingDebit: ledger.openingDebit,
+          openingCredit: ledger.openingCredit,
+          debit: ledger.debit,
+          credit: ledger.credit,
+          closingDebit: ledger.closingDebit,
+          closingCredit: ledger.closingCredit,
+        })),
+      );
 
-    if (mode === "ledger") {
-      const rows = ledgerBalances.map((ledger) => ({
-        id: ledger._id,
-        name: ledger.name,
-        rowType: "ledger",
-        value: ledger.value,
-        groupId: ledger.groupId || null,
-        groupName: ledger.groupName,
-        groupTrail: ledger.groupTrail,
-      }));
+      if (mode === "ledger") {
+        const rows = ledgerBalances.map((ledger) => ({
+          id: ledger._id,
+          name: ledger.name,
+          rowType: "ledger",
+          value: ledger.value,
+          groupId: ledger.groupId || null,
+          groupName: ledger.groupName,
+          groupTrail: ledger.groupTrail,
+        }));
 
-      return res.json({
+        return res.json({
+          mode,
+          rows,
+          totals: {
+            count: rows.length,
+            value: rows.reduce(
+              (sum, row) => normalizeMoney(sum + Number(row.value || 0)),
+              0,
+            ),
+          },
+          trail: [],
+        });
+      }
+
+      const selectedGroup = selectedGroupId
+        ? findGroupNodeById(tree, selectedGroupId)
+        : null;
+      const rows = selectedGroup
+        ? [
+            ...(selectedGroup.children || []).map((group) => ({
+              id: group.id,
+              name: group.name,
+              rowType: "group",
+              value: balanceValueFromSplit(group.totals),
+            })),
+            ...((selectedGroup.ledgers || []).map((ledger) => ({
+              id: ledger.id,
+              name: ledger.name,
+              rowType: "ledger",
+              value: balanceValueFromSplit(ledger.totals),
+              groupId: ledger.groupId || null,
+              groupName: ledger.groupName || "",
+              groupTrail: buildGroupTrailLabel(groupsById, ledger.groupId),
+            })) || []),
+          ]
+        : (tree || []).map((group) => ({
+            id: group.id,
+            name: group.name,
+            rowType: "group",
+            value: balanceValueFromSplit(group.totals),
+          }));
+
+      const trail = [];
+      if (selectedGroupId) {
+        let cursor = groupsById.get(selectedGroupId);
+        const visited = new Set();
+        while (cursor && !visited.has(String(cursor._id))) {
+          trail.unshift({
+            id: String(cursor._id),
+            name: cursor.name,
+          });
+          visited.add(String(cursor._id));
+          cursor = cursor.parentId
+            ? groupsById.get(String(cursor.parentId))
+            : null;
+        }
+      }
+
+      res.json({
         mode,
         rows,
         totals: {
@@ -5486,69 +5646,16 @@ app.get("/companies/:companyId/reports/account-books-summary", async (req, res) 
             0,
           ),
         },
-        trail: [],
+        trail,
+        currentGroupId: selectedGroupId || "",
+        currentGroupName: selectedGroup?.name || "",
       });
+    } catch (err) {
+      console.error("Error building account books summary:", err);
+      res.status(500).json({ message: "Error building account books summary" });
     }
-
-    const selectedGroup = selectedGroupId ? findGroupNodeById(tree, selectedGroupId) : null;
-    const rows = selectedGroup
-      ? [
-          ...(selectedGroup.children || []).map((group) => ({
-            id: group.id,
-            name: group.name,
-            rowType: "group",
-            value: balanceValueFromSplit(group.totals),
-          })),
-          ...((selectedGroup.ledgers || []).map((ledger) => ({
-            id: ledger.id,
-            name: ledger.name,
-            rowType: "ledger",
-            value: balanceValueFromSplit(ledger.totals),
-            groupId: ledger.groupId || null,
-            groupName: ledger.groupName || "",
-            groupTrail: buildGroupTrailLabel(groupsById, ledger.groupId),
-          })) || []),
-        ]
-      : (tree || []).map((group) => ({
-          id: group.id,
-          name: group.name,
-          rowType: "group",
-          value: balanceValueFromSplit(group.totals),
-        }));
-
-    const trail = [];
-    if (selectedGroupId) {
-      let cursor = groupsById.get(selectedGroupId);
-      const visited = new Set();
-      while (cursor && !visited.has(String(cursor._id))) {
-        trail.unshift({
-          id: String(cursor._id),
-          name: cursor.name,
-        });
-        visited.add(String(cursor._id));
-        cursor = cursor.parentId ? groupsById.get(String(cursor.parentId)) : null;
-      }
-    }
-
-    res.json({
-      mode,
-      rows,
-      totals: {
-        count: rows.length,
-        value: rows.reduce(
-          (sum, row) => normalizeMoney(sum + Number(row.value || 0)),
-          0,
-        ),
-      },
-      trail,
-      currentGroupId: selectedGroupId || "",
-      currentGroupName: selectedGroup?.name || "",
-    });
-  } catch (err) {
-    console.error("Error building account books summary:", err);
-    res.status(500).json({ message: "Error building account books summary" });
-  }
-});
+  },
+);
 
 // ---------- ITEMS (INVENTORY MASTERS) ----------
 
@@ -5617,7 +5724,9 @@ app.get("/companies/:companyId/items", async (req, res) => {
       return leftTime - rightTime;
     })
     .forEach((voucher) => {
-      const lines = Array.isArray(voucher.inventoryLines) ? voucher.inventoryLines : [];
+      const lines = Array.isArray(voucher.inventoryLines)
+        ? voucher.inventoryLines
+        : [];
       lines.forEach((line) => {
         const itemId = String(line.itemId || "");
         if (!itemId) return;
@@ -6067,7 +6176,9 @@ app.get("/companies/:companyId/chart-of-accounts/ledgers", async (req, res) => {
       let current = groupMap.get(String(groupId || ""));
       while (current) {
         names.unshift(current.name);
-        current = current.parentId ? groupMap.get(String(current.parentId)) : null;
+        current = current.parentId
+          ? groupMap.get(String(current.parentId))
+          : null;
       }
       return names.join(" / ");
     }
@@ -8344,4 +8455,3 @@ connectDb()
     console.error("Failed to connect DB:", err);
     process.exit(1);
   });
-
