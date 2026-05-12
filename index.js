@@ -278,6 +278,57 @@ function toBoolean(value) {
   return Boolean(value);
 }
 
+function normalizeBankLedgerDetails(details = {}) {
+  if (!details || typeof details !== "object") return null;
+
+  const normalized = {
+    accountHolderName: normalizeTextBlock(details.accountHolderName || ""),
+    accountNumber: normalizeTextBlock(details.accountNumber || ""),
+    bankCode: normalizeTextBlock(details.bankCode || ""),
+    swiftCode: normalizeTextBlock(details.swiftCode || ""),
+    bankName: normalizeTextBlock(details.bankName || ""),
+    branchName: normalizeTextBlock(details.branchName || ""),
+    branchCode: normalizeTextBlock(details.branchCode || ""),
+    bankConfigurationEnabled: toBoolean(details.bankConfigurationEnabled),
+    mailingName: normalizeTextBlock(details.mailingName || ""),
+    mailingAddress: normalizeTextBlock(details.mailingAddress || ""),
+    division: normalizeTextBlock(details.division || ""),
+    country: normalizeTextBlock(details.country || ""),
+    postalCode: normalizeTextBlock(details.postalCode || ""),
+  };
+
+  const hasMeaningfulValue = Object.entries(normalized).some(([key, value]) =>
+    key === "bankConfigurationEnabled" ? value === true : Boolean(value),
+  );
+
+  return hasMeaningfulValue ? normalized : null;
+}
+
+function buildGroupChildrenMap(groups = []) {
+  const childMap = new Map();
+  groups.forEach((group) => {
+    const parentKey = group.parentId ? String(group.parentId) : "ROOT";
+    if (!childMap.has(parentKey)) childMap.set(parentKey, []);
+    childMap.get(parentKey).push(group);
+  });
+  return childMap;
+}
+
+function collectDescendantGroupIds(rootIds = [], childMap = new Map()) {
+  const visited = new Set();
+  const stack = [...rootIds.map((value) => String(value || ""))].filter(Boolean);
+
+  while (stack.length) {
+    const currentId = stack.pop();
+    if (!currentId || visited.has(currentId)) continue;
+    visited.add(currentId);
+    const children = childMap.get(currentId) || [];
+    children.forEach((child) => stack.push(String(child._id)));
+  }
+
+  return [...visited];
+}
+
 function summarizeSalaryHeads(heads = []) {
   const totalEarnings = normalizeMoney(
     heads
@@ -3787,6 +3838,15 @@ app.get("/companies/:companyId/ledgers/defaults", async (req, res) => {
     const groupById = new Map(
       groups.map((group) => [String(group._id), group]),
     );
+    const bankAccountRoots = groups.filter(
+      (group) => nameKey(group.name) === "bank accounts",
+    );
+    const bankAccountGroupIds = new Set(
+      collectDescendantGroupIds(
+        bankAccountRoots.map((group) => group._id),
+        buildGroupChildrenMap(groups),
+      ),
+    );
 
     res.json({
       salesLedger:
@@ -3796,9 +3856,7 @@ app.get("/companies/:companyId/ledgers/defaults", async (req, res) => {
       cashLedger:
         ledgers.find((ledger) => nameKey(ledger.name) === "cash") || null,
       bankLedgers: ledgers.filter(
-        (ledger) =>
-          nameKey(groupById.get(String(ledger.groupId))?.name) ===
-          "bank accounts",
+        (ledger) => bankAccountGroupIds.has(String(ledger.groupId)),
       ),
       debtorLedgers: ledgers.filter(
         (ledger) =>
@@ -3876,6 +3934,7 @@ app.post("/companies/:companyId/ledgers", async (req, res) => {
       openingBalance = 0,
       openingDrCr = "DR",
       priceLevelId = null,
+      bankDetails = null,
     } = req.body;
     if (!name || !groupId) {
       return res
@@ -3912,6 +3971,11 @@ app.post("/companies/:companyId/ledgers", async (req, res) => {
       createdAt: new Date(),
     };
 
+    const normalizedBankDetails = normalizeBankLedgerDetails(bankDetails);
+    if (normalizedBankDetails) {
+      doc.bankDetails = normalizedBankDetails;
+    }
+
     const result = await Ledgers.insertOne(doc);
     res.status(201).json({ _id: result.insertedId, ...doc });
   } catch (err) {
@@ -3926,7 +3990,13 @@ app.put("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
     const companyId = new ObjectId(req.params.companyId);
     const ledgerId = new ObjectId(req.params.ledgerId);
     const name = normalizeName(req.body.name);
-    const { groupId, openingBalance, openingDrCr, priceLevelId } = req.body;
+    const {
+      groupId,
+      openingBalance,
+      openingDrCr,
+      priceLevelId,
+      bankDetails,
+    } = req.body;
     if (!name) {
       return res.status(400).json({ message: "Ledger name is required" });
     }
@@ -3964,6 +4034,15 @@ app.put("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
           priceLevelId !== undefined ? priceLevelId || null : undefined,
       },
     };
+
+    if (bankDetails !== undefined) {
+      const normalizedBankDetails = normalizeBankLedgerDetails(bankDetails);
+      if (normalizedBankDetails) {
+        update.$set.bankDetails = normalizedBankDetails;
+      } else {
+        update.$unset = { ...(update.$unset || {}), bankDetails: "" };
+      }
+    }
 
     // Clean undefined keys
     Object.keys(update.$set).forEach(
