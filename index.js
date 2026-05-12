@@ -5651,7 +5651,21 @@ app.get(
           id: ledger._id,
           name: ledger.name,
           rowType: "ledger",
-          value: ledger.value,
+          openingValue: balanceValueFromSplit({
+            closingDebit: ledger.openingDebit,
+            closingCredit: ledger.openingCredit,
+          }),
+          openingSide:
+            Number(ledger.openingCredit || 0) > Number(ledger.openingDebit || 0)
+              ? "CR"
+              : "DR",
+          debit: normalizeMoney(ledger.debit || 0),
+          credit: normalizeMoney(ledger.credit || 0),
+          closingValue: ledger.value,
+          closingSide:
+            Number(ledger.closingCredit || 0) > Number(ledger.closingDebit || 0)
+              ? "CR"
+              : "DR",
           groupId: ledger.groupId || null,
           groupName: ledger.groupName,
           groupTrail: ledger.groupTrail,
@@ -5662,8 +5676,22 @@ app.get(
           rows,
           totals: {
             count: rows.length,
-            value: rows.reduce(
-              (sum, row) => normalizeMoney(sum + Number(row.value || 0)),
+            openingValue: rows.reduce(
+              (sum, row) =>
+                normalizeMoney(sum + Number(row.openingValue || 0)),
+              0,
+            ),
+            debit: rows.reduce(
+              (sum, row) => normalizeMoney(sum + Number(row.debit || 0)),
+              0,
+            ),
+            credit: rows.reduce(
+              (sum, row) => normalizeMoney(sum + Number(row.credit || 0)),
+              0,
+            ),
+            closingValue: rows.reduce(
+              (sum, row) =>
+                normalizeMoney(sum + Number(row.closingValue || 0)),
               0,
             ),
           },
@@ -5680,13 +5708,45 @@ app.get(
               id: group.id,
               name: group.name,
               rowType: "group",
-              value: balanceValueFromSplit(group.totals),
+              openingValue: balanceValueFromSplit({
+                closingDebit: group.totals.openingDebit,
+                closingCredit: group.totals.openingCredit,
+              }),
+              openingSide:
+                Number(group.totals.openingCredit || 0) >
+                Number(group.totals.openingDebit || 0)
+                  ? "CR"
+                  : "DR",
+              debit: normalizeMoney(group.totals.debit || 0),
+              credit: normalizeMoney(group.totals.credit || 0),
+              closingValue: balanceValueFromSplit(group.totals),
+              closingSide:
+                Number(group.totals.closingCredit || 0) >
+                Number(group.totals.closingDebit || 0)
+                  ? "CR"
+                  : "DR",
             })),
             ...((selectedGroup.ledgers || []).map((ledger) => ({
               id: ledger.id,
               name: ledger.name,
               rowType: "ledger",
-              value: balanceValueFromSplit(ledger.totals),
+              openingValue: balanceValueFromSplit({
+                closingDebit: ledger.totals.openingDebit,
+                closingCredit: ledger.totals.openingCredit,
+              }),
+              openingSide:
+                Number(ledger.totals.openingCredit || 0) >
+                Number(ledger.totals.openingDebit || 0)
+                  ? "CR"
+                  : "DR",
+              debit: normalizeMoney(ledger.totals.debit || 0),
+              credit: normalizeMoney(ledger.totals.credit || 0),
+              closingValue: balanceValueFromSplit(ledger.totals),
+              closingSide:
+                Number(ledger.totals.closingCredit || 0) >
+                Number(ledger.totals.closingDebit || 0)
+                  ? "CR"
+                  : "DR",
               groupId: ledger.groupId || null,
               groupName: ledger.groupName || "",
               groupTrail: buildGroupTrailLabel(groupsById, ledger.groupId),
@@ -5696,7 +5756,23 @@ app.get(
             id: group.id,
             name: group.name,
             rowType: "group",
-            value: balanceValueFromSplit(group.totals),
+            openingValue: balanceValueFromSplit({
+              closingDebit: group.totals.openingDebit,
+              closingCredit: group.totals.openingCredit,
+            }),
+            openingSide:
+              Number(group.totals.openingCredit || 0) >
+              Number(group.totals.openingDebit || 0)
+                ? "CR"
+                : "DR",
+            debit: normalizeMoney(group.totals.debit || 0),
+            credit: normalizeMoney(group.totals.credit || 0),
+            closingValue: balanceValueFromSplit(group.totals),
+            closingSide:
+              Number(group.totals.closingCredit || 0) >
+              Number(group.totals.closingDebit || 0)
+                ? "CR"
+                : "DR",
           }));
 
       const trail = [];
@@ -5720,8 +5796,22 @@ app.get(
         rows,
         totals: {
           count: rows.length,
-          value: rows.reduce(
-            (sum, row) => normalizeMoney(sum + Number(row.value || 0)),
+          openingValue: rows.reduce(
+            (sum, row) =>
+              normalizeMoney(sum + Number(row.openingValue || 0)),
+            0,
+          ),
+          debit: rows.reduce(
+            (sum, row) => normalizeMoney(sum + Number(row.debit || 0)),
+            0,
+          ),
+          credit: rows.reduce(
+            (sum, row) => normalizeMoney(sum + Number(row.credit || 0)),
+            0,
+          ),
+          closingValue: rows.reduce(
+            (sum, row) =>
+              normalizeMoney(sum + Number(row.closingValue || 0)),
             0,
           ),
         },
