@@ -5702,78 +5702,73 @@ app.get(
       const selectedGroup = selectedGroupId
         ? findGroupNodeById(tree, selectedGroupId)
         : null;
+      const toGroupSummaryRow = (group) => ({
+        id: group.id,
+        name: group.name,
+        rowType: "group",
+        openingValue: balanceValueFromSplit({
+          closingDebit: group.totals.openingDebit,
+          closingCredit: group.totals.openingCredit,
+        }),
+        openingSide:
+          Number(group.totals.openingCredit || 0) >
+          Number(group.totals.openingDebit || 0)
+            ? "CR"
+            : "DR",
+        debit: normalizeMoney(group.totals.debit || 0),
+        credit: normalizeMoney(group.totals.credit || 0),
+        closingValue: balanceValueFromSplit(group.totals),
+        closingSide:
+          Number(group.totals.closingCredit || 0) >
+          Number(group.totals.closingDebit || 0)
+            ? "CR"
+            : "DR",
+        groupTrail: buildGroupTrailLabel(groupsById, group.parentId),
+      });
+      const toLedgerSummaryRow = (ledger) => ({
+        id: ledger.id,
+        name: ledger.name,
+        rowType: "ledger",
+        openingValue: balanceValueFromSplit({
+          closingDebit: ledger.totals.openingDebit,
+          closingCredit: ledger.totals.openingCredit,
+        }),
+        openingSide:
+          Number(ledger.totals.openingCredit || 0) >
+          Number(ledger.totals.openingDebit || 0)
+            ? "CR"
+            : "DR",
+        debit: normalizeMoney(ledger.totals.debit || 0),
+        credit: normalizeMoney(ledger.totals.credit || 0),
+        closingValue: balanceValueFromSplit(ledger.totals),
+        closingSide:
+          Number(ledger.totals.closingCredit || 0) >
+          Number(ledger.totals.closingDebit || 0)
+            ? "CR"
+            : "DR",
+        groupId: ledger.groupId || null,
+        groupName: ledger.groupName || "",
+        groupTrail: buildGroupTrailLabel(groupsById, ledger.groupId),
+      });
+      function collectSearchRows(node) {
+        return [
+          toGroupSummaryRow(node),
+          ...(node.ledgers || []).map(toLedgerSummaryRow),
+          ...((node.children || []).flatMap(collectSearchRows) || []),
+        ];
+      }
       const rows = selectedGroup
         ? [
-            ...(selectedGroup.children || []).map((group) => ({
-              id: group.id,
-              name: group.name,
-              rowType: "group",
-              openingValue: balanceValueFromSplit({
-                closingDebit: group.totals.openingDebit,
-                closingCredit: group.totals.openingCredit,
-              }),
-              openingSide:
-                Number(group.totals.openingCredit || 0) >
-                Number(group.totals.openingDebit || 0)
-                  ? "CR"
-                  : "DR",
-              debit: normalizeMoney(group.totals.debit || 0),
-              credit: normalizeMoney(group.totals.credit || 0),
-              closingValue: balanceValueFromSplit(group.totals),
-              closingSide:
-                Number(group.totals.closingCredit || 0) >
-                Number(group.totals.closingDebit || 0)
-                  ? "CR"
-                  : "DR",
-            })),
-            ...((selectedGroup.ledgers || []).map((ledger) => ({
-              id: ledger.id,
-              name: ledger.name,
-              rowType: "ledger",
-              openingValue: balanceValueFromSplit({
-                closingDebit: ledger.totals.openingDebit,
-                closingCredit: ledger.totals.openingCredit,
-              }),
-              openingSide:
-                Number(ledger.totals.openingCredit || 0) >
-                Number(ledger.totals.openingDebit || 0)
-                  ? "CR"
-                  : "DR",
-              debit: normalizeMoney(ledger.totals.debit || 0),
-              credit: normalizeMoney(ledger.totals.credit || 0),
-              closingValue: balanceValueFromSplit(ledger.totals),
-              closingSide:
-                Number(ledger.totals.closingCredit || 0) >
-                Number(ledger.totals.closingDebit || 0)
-                  ? "CR"
-                  : "DR",
-              groupId: ledger.groupId || null,
-              groupName: ledger.groupName || "",
-              groupTrail: buildGroupTrailLabel(groupsById, ledger.groupId),
-            })) || []),
+            ...(selectedGroup.children || []).map(toGroupSummaryRow),
+            ...((selectedGroup.ledgers || []).map(toLedgerSummaryRow) || []),
           ]
-        : (tree || []).map((group) => ({
-            id: group.id,
-            name: group.name,
-            rowType: "group",
-            openingValue: balanceValueFromSplit({
-              closingDebit: group.totals.openingDebit,
-              closingCredit: group.totals.openingCredit,
-            }),
-            openingSide:
-              Number(group.totals.openingCredit || 0) >
-              Number(group.totals.openingDebit || 0)
-                ? "CR"
-                : "DR",
-            debit: normalizeMoney(group.totals.debit || 0),
-            credit: normalizeMoney(group.totals.credit || 0),
-            closingValue: balanceValueFromSplit(group.totals),
-            closingSide:
-              Number(group.totals.closingCredit || 0) >
-              Number(group.totals.closingDebit || 0)
-                ? "CR"
-                : "DR",
-          }));
+        : (tree || []).map(toGroupSummaryRow);
+      const searchRows = selectedGroup
+        ? [
+            ...((selectedGroup.children || []).flatMap(collectSearchRows) || []),
+            ...((selectedGroup.ledgers || []).map(toLedgerSummaryRow) || []),
+          ]
+        : (tree || []).flatMap(collectSearchRows);
 
       const trail = [];
       if (selectedGroupId) {
@@ -5794,6 +5789,7 @@ app.get(
       res.json({
         mode,
         rows,
+        searchRows,
         totals: {
           count: rows.length,
           openingValue: rows.reduce(
