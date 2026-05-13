@@ -316,7 +316,9 @@ function buildGroupChildrenMap(groups = []) {
 
 function collectDescendantGroupIds(rootIds = [], childMap = new Map()) {
   const visited = new Set();
-  const stack = [...rootIds.map((value) => String(value || ""))].filter(Boolean);
+  const stack = [...rootIds.map((value) => String(value || ""))].filter(
+    Boolean,
+  );
 
   while (stack.length) {
     const currentId = stack.pop();
@@ -3855,8 +3857,8 @@ app.get("/companies/:companyId/ledgers/defaults", async (req, res) => {
         ledgers.find((ledger) => nameKey(ledger.name) === "purchase") || null,
       cashLedger:
         ledgers.find((ledger) => nameKey(ledger.name) === "cash") || null,
-      bankLedgers: ledgers.filter(
-        (ledger) => bankAccountGroupIds.has(String(ledger.groupId)),
+      bankLedgers: ledgers.filter((ledger) =>
+        bankAccountGroupIds.has(String(ledger.groupId)),
       ),
       debtorLedgers: ledgers.filter(
         (ledger) =>
@@ -3990,13 +3992,8 @@ app.put("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
     const companyId = new ObjectId(req.params.companyId);
     const ledgerId = new ObjectId(req.params.ledgerId);
     const name = normalizeName(req.body.name);
-    const {
-      groupId,
-      openingBalance,
-      openingDrCr,
-      priceLevelId,
-      bankDetails,
-    } = req.body;
+    const { groupId, openingBalance, openingDrCr, priceLevelId, bankDetails } =
+      req.body;
     if (!name) {
       return res.status(400).json({ message: "Ledger name is required" });
     }
@@ -5677,8 +5674,7 @@ app.get(
           totals: {
             count: rows.length,
             openingValue: rows.reduce(
-              (sum, row) =>
-                normalizeMoney(sum + Number(row.openingValue || 0)),
+              (sum, row) => normalizeMoney(sum + Number(row.openingValue || 0)),
               0,
             ),
             debit: rows.reduce(
@@ -5690,8 +5686,7 @@ app.get(
               0,
             ),
             closingValue: rows.reduce(
-              (sum, row) =>
-                normalizeMoney(sum + Number(row.closingValue || 0)),
+              (sum, row) => normalizeMoney(sum + Number(row.closingValue || 0)),
               0,
             ),
           },
@@ -5765,7 +5760,8 @@ app.get(
         : (tree || []).map(toGroupSummaryRow);
       const searchRows = selectedGroup
         ? [
-            ...((selectedGroup.children || []).flatMap(collectSearchRows) || []),
+            ...((selectedGroup.children || []).flatMap(collectSearchRows) ||
+              []),
             ...((selectedGroup.ledgers || []).map(toLedgerSummaryRow) || []),
           ]
         : (tree || []).flatMap(collectSearchRows);
@@ -5793,8 +5789,7 @@ app.get(
         totals: {
           count: rows.length,
           openingValue: rows.reduce(
-            (sum, row) =>
-              normalizeMoney(sum + Number(row.openingValue || 0)),
+            (sum, row) => normalizeMoney(sum + Number(row.openingValue || 0)),
             0,
           ),
           debit: rows.reduce(
@@ -5806,8 +5801,7 @@ app.get(
             0,
           ),
           closingValue: rows.reduce(
-            (sum, row) =>
-              normalizeMoney(sum + Number(row.closingValue || 0)),
+            (sum, row) => normalizeMoney(sum + Number(row.closingValue || 0)),
             0,
           ),
         },
@@ -5823,6 +5817,49 @@ app.get(
 );
 
 // ---------- ITEMS (INVENTORY MASTERS) ----------
+
+function normalizeItemIdentifierList(values = []) {
+  const seen = new Set();
+  return values
+    .map((value) => normalizeName(value))
+    .filter(Boolean)
+    .filter((value) => {
+      const key = value.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function collectItemIdentifiers(item = {}) {
+  return normalizeItemIdentifierList([
+    item.alias,
+    ...(item.secondaryAliases || []),
+  ]);
+}
+
+async function findConflictingItemIdentifier(
+  companyId,
+  identifiers = [],
+  excludeItemId = null,
+) {
+  if (!identifiers.length) return null;
+  const items = await Items.find({
+    companyId,
+    ...(excludeItemId ? { _id: { $ne: excludeItemId } } : {}),
+  }).toArray();
+
+  const targetKeys = new Set(
+    identifiers.map((value) => String(value).toLowerCase()),
+  );
+  return (
+    items.find((item) =>
+      collectItemIdentifiers(item).some((identifier) =>
+        targetKeys.has(String(identifier).toLowerCase()),
+      ),
+    ) || null
+  );
+}
 
 // List items for a company
 app.get("/companies/:companyId/items", async (req, res) => {
@@ -5919,6 +5956,7 @@ app.post("/companies/:companyId/items", async (req, res) => {
     const {
       name,
       alias,
+      secondaryAliases,
       groupId,
       stockCategoryId,
       stockCategory,
@@ -5966,6 +6004,20 @@ app.post("/companies/:companyId/items", async (req, res) => {
       return res.status(400).json({ message: "Item name already exists" });
     }
 
+    const normalizedIdentifiers = normalizeItemIdentifierList([
+      alias,
+      ...(Array.isArray(secondaryAliases) ? secondaryAliases : []),
+    ]);
+    const conflictingIdentifierItem = await findConflictingItemIdentifier(
+      companyId,
+      normalizedIdentifiers,
+    );
+    if (conflictingIdentifierItem) {
+      return res.status(400).json({
+        message: `Alias or secondary alias already used by ${conflictingIdentifierItem.name}`,
+      });
+    }
+
     const resolvedStockCategory = await resolveMasterName(
       StockCategories,
       companyId,
@@ -5986,6 +6038,7 @@ app.post("/companies/:companyId/items", async (req, res) => {
       companyId,
       name: normalizedName,
       alias: normalizeName(alias),
+      secondaryAliases: normalizeItemIdentifierList(secondaryAliases || []),
       groupId: new ObjectId(groupId),
       stockCategoryId:
         stockCategoryId && ObjectId.isValid(stockCategoryId)
@@ -6027,6 +6080,7 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
     const {
       name,
       alias,
+      secondaryAliases,
       groupId,
       stockCategoryId,
       stockCategory,
@@ -6059,6 +6113,20 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
     });
     if (duplicate) {
       return res.status(400).json({ message: "Item name already exists" });
+    }
+    const normalizedIdentifiers = normalizeItemIdentifierList([
+      alias,
+      ...(Array.isArray(secondaryAliases) ? secondaryAliases : []),
+    ]);
+    const conflictingIdentifierItem = await findConflictingItemIdentifier(
+      companyId,
+      normalizedIdentifiers,
+      itemId,
+    );
+    if (conflictingIdentifierItem) {
+      return res.status(400).json({
+        message: `Alias or secondary alias already used by ${conflictingIdentifierItem.name}`,
+      });
     }
     const group = await Groups.findOne({
       _id: new ObjectId(groupId),
@@ -6095,6 +6163,7 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
       $set: {
         name: normalizedName,
         alias: normalizeName(alias),
+        secondaryAliases: normalizeItemIdentifierList(secondaryAliases || []),
         groupId: new ObjectId(groupId),
         stockCategoryId:
           stockCategoryId && ObjectId.isValid(stockCategoryId)
@@ -7280,6 +7349,109 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
       }
     });
 
+    const incomes = [];
+    const expenses = [];
+
+    balances.forEach((ledger) => {
+      const group = groupMap.get(String(ledger.groupId)) || ledger.group;
+      const amount =
+        group?.nature === "INCOME"
+          ? normalizeMoney((ledger.credit || 0) - (ledger.debit || 0))
+          : normalizeMoney((ledger.debit || 0) - (ledger.credit || 0));
+
+      const row = {
+        ledgerId: ledger._id,
+        ledgerName: ledger.name,
+        groupName: group?.name || "",
+        amount: normalizeMoney(Math.max(amount, 0)),
+        affectsGrossProfit: Boolean(group?.affectsGrossProfit),
+      };
+
+      if (
+        group?.nature === "INCOME" &&
+        !row.affectsGrossProfit &&
+        row.amount > 0
+      ) {
+        incomes.push(row);
+      }
+      if (
+        group?.nature === "EXPENSE" &&
+        !row.affectsGrossProfit &&
+        row.amount > 0
+      ) {
+        expenses.push(row);
+      }
+    });
+
+    const periodVouchers = vouchers.filter((voucher) => {
+      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+      return (
+        (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
+        (!toDate || (voucherDate && voucherDate <= toDate))
+      );
+    });
+
+    const voucherTotals = {
+      sales: 0,
+      salesReturns: 0,
+      purchases: 0,
+      purchaseReturns: 0,
+    };
+
+    periodVouchers.forEach((voucher) => {
+      const name = nameKey(voucher.voucherName || "");
+      const amount = voucherTotalAmount(voucher);
+      if (name === "sales" || name === "pos voucher") {
+        voucherTotals.sales = normalizeMoney(voucherTotals.sales + amount);
+      } else if (name === "credit note") {
+        voucherTotals.salesReturns = normalizeMoney(
+          voucherTotals.salesReturns + amount,
+        );
+      } else if (name === "purchase") {
+        voucherTotals.purchases = normalizeMoney(
+          voucherTotals.purchases + amount,
+        );
+      } else if (name === "debit note") {
+        voucherTotals.purchaseReturns = normalizeMoney(
+          voucherTotals.purchaseReturns + amount,
+        );
+      }
+    });
+
+    const openingStock = normalizeMoney(
+      (stockSummary.rows || []).reduce(
+        (sum, row) => sum + Number(row.openingValue || 0),
+        0,
+      ),
+    );
+    const closingStock = normalizeMoney(
+      (stockSummary.rows || []).reduce(
+        (sum, row) => sum + Number(row.closingValue || 0),
+        0,
+      ),
+    );
+    const netSales = normalizeMoney(
+      voucherTotals.sales - voucherTotals.salesReturns,
+    );
+    const netPurchases = normalizeMoney(
+      voucherTotals.purchases - voucherTotals.purchaseReturns,
+    );
+    const costOfGoodsSold = normalizeMoney(
+      openingStock + netPurchases - closingStock,
+    );
+    const grossProfit = normalizeMoney(netSales - costOfGoodsSold);
+    const indirectIncome = incomes.reduce(
+      (sum, row) => normalizeMoney(sum + row.amount),
+      0,
+    );
+    const indirectExpense = expenses.reduce(
+      (sum, row) => normalizeMoney(sum + row.amount),
+      0,
+    );
+    const netProfit = normalizeMoney(
+      grossProfit + indirectIncome - indirectExpense,
+    );
+
     if (
       stockSummary?.totals?.openingValue ||
       stockSummary?.totals?.closingValue
@@ -7297,6 +7469,30 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
         current.amount + Number(stockSummary.totals.closingValue || 0),
       );
       assets.set("Closing Stock", current);
+    }
+
+    if (netProfit !== 0) {
+      const profitLossGroup = groups.find(
+        (group) => nameKey(group.name || "") === "profit & loss",
+      );
+      const profitLossAmount = normalizeMoney(Math.abs(netProfit));
+      const targetCollection =
+        profitLossGroup?.nature === "ASSET"
+          ? assets
+          : profitLossGroup?.nature === "LIABILITY"
+            ? liabilities
+            : netProfit >= 0
+              ? liabilities
+              : assets;
+      const targetGroupName = profitLossGroup?.name || "Profit & Loss";
+      const current = targetCollection.get(targetGroupName) || {
+        groupName: targetGroupName,
+        openingAmount: 0,
+        amount: 0,
+        ledgers: [],
+      };
+      current.amount = profitLossAmount;
+      targetCollection.set(targetGroupName, current);
     }
 
     const assetRows = [...assets.values()].sort((a, b) =>
