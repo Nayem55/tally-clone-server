@@ -5403,6 +5403,245 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
   }
 });
 
+app.get("/companies/:companyId/reports/profit-loss-drilldown", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    await ensureCompanyCoreMasters(companyId);
+    const fromDate = safeDate(req.query.from);
+    const toDate = safeDate(req.query.to);
+
+    const [groups, vouchers, ledgers, stockSummary] = await Promise.all([
+      Groups.find({ companyId }).toArray(),
+      Vouchers.find({ companyId }).toArray(),
+      Ledgers.aggregate([
+        { $match: { companyId } },
+        {
+          $lookup: {
+            from: "groups",
+            localField: "groupId",
+            foreignField: "_id",
+            as: "group",
+          },
+        },
+        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+      ]).toArray(),
+      buildStockSummary(companyId, fromDate, toDate),
+    ]);
+
+    const groupMap = new Map(groups.map((group) => [String(group._id), group]));
+    const ledgerMap = new Map(ledgers.map((ledger) => [String(ledger._id), ledger]));
+    const periodVouchers = vouchers
+      .filter((voucher) => {
+        const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+        return (
+          (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
+          (!toDate || (voucherDate && voucherDate <= toDate))
+        );
+      })
+      .sort((left, right) => {
+        const leftTime = left?.date ? new Date(left.date).getTime() : 0;
+        const rightTime = right?.date ? new Date(right.date).getTime() : 0;
+        return leftTime - rightTime;
+      });
+
+    const entries = [];
+    const openingStock = normalizeMoney(
+      (stockSummary.rows || []).reduce(
+        (sum, row) => sum + Number(row.openingValue || 0),
+        0,
+      ),
+    );
+    const closingStock = normalizeMoney(
+      (stockSummary.rows || []).reduce(
+        (sum, row) => sum + Number(row.closingValue || 0),
+        0,
+      ),
+    );
+
+    if (openingStock > 0) {
+      entries.push({
+        voucherId: null,
+        voucherName: "Opening Stock",
+        voucherNumber: "",
+        date: fromDate || null,
+        dateLabel: formatDateLabel(fromDate),
+        lineIndex: 0,
+        debit: 0,
+        credit: openingStock,
+        narration: "Opening stock valuation for the selected period.",
+        counterpart: "Inventory Valuation",
+        itemName: "",
+        isSynthetic: true,
+      });
+    }
+
+    periodVouchers.forEach((voucher) => {
+      const voucherNameKey = nameKey(voucher.voucherName || "");
+      const voucherAmount = voucherTotalAmount(voucher);
+      const itemName = (voucher.inventoryLines || [])
+        .map((inventoryLine) => normalizeName(inventoryLine.itemName))
+        .filter(Boolean)
+        .join(", ");
+
+      function pushVoucherEntry({
+        debit = 0,
+        credit = 0,
+        counterpart = "",
+        narration = "",
+        itemNameOverride = itemName,
+      }) {
+        entries.push({
+          voucherId: voucher._id,
+          voucherName: voucher.voucherName || "Voucher",
+          voucherNumber:
+            voucher.number || voucher.invoiceNumber || voucher.voucherNumber || "",
+          date: voucher.date || null,
+          dateLabel: formatDateLabel(voucher.date),
+          lineIndex: 0,
+          debit: normalizeMoney(debit),
+          credit: normalizeMoney(credit),
+          narration: narration || voucher.narration || voucher.note || "",
+          counterpart,
+          itemName: itemNameOverride,
+          isSynthetic: false,
+        });
+      }
+
+      if (voucherNameKey === "sales" || voucherNameKey === "pos voucher") {
+        pushVoucherEntry({
+          debit: voucherAmount,
+          counterpart:
+            (voucher.lines || [])
+              .map((line) => ledgerMap.get(String(line.ledgerId))?.name || "")
+              .find((name) => name && nameKey(name) !== "sales") || "Sales",
+        });
+      } else if (voucherNameKey === "credit note") {
+        pushVoucherEntry({
+          credit: voucherAmount,
+          counterpart: "Sales Return",
+        });
+      } else if (voucherNameKey === "purchase") {
+        pushVoucherEntry({
+          credit: voucherAmount,
+          counterpart:
+            (voucher.lines || [])
+              .map((line) => ledgerMap.get(String(line.ledgerId))?.name || "")
+              .find((name) => name && nameKey(name) !== "purchase") || "Purchase",
+        });
+      } else if (voucherNameKey === "debit note") {
+        pushVoucherEntry({
+          debit: voucherAmount,
+          counterpart: "Purchase Return",
+        });
+      }
+
+      (voucher.lines || []).forEach((line, lineIndex) => {
+        const ledger = ledgerMap.get(String(line.ledgerId));
+        const group = groupMap.get(String(ledger?.groupId)) || ledger?.group;
+        if (!ledger || !group || group.affectsGrossProfit) return;
+
+        const debit = Number(line.debit || 0);
+        const credit = Number(line.credit || 0);
+
+        if (group.nature === "INCOME") {
+          const effect = normalizeMoney(credit - debit);
+          if (!effect) return;
+          entries.push({
+            voucherId: voucher._id,
+            voucherName: voucher.voucherName || "Voucher",
+            voucherNumber:
+              voucher.number || voucher.invoiceNumber || voucher.voucherNumber || "",
+            date: voucher.date || null,
+            dateLabel: formatDateLabel(voucher.date),
+            lineIndex,
+            debit: effect > 0 ? effect : 0,
+            credit: effect < 0 ? Math.abs(effect) : 0,
+            narration: line.narration || voucher.narration || voucher.note || "",
+            counterpart: ledger.name,
+            itemName: "",
+            isSynthetic: false,
+          });
+        }
+
+        if (group.nature === "EXPENSE") {
+          const effect = normalizeMoney(debit - credit);
+          if (!effect) return;
+          entries.push({
+            voucherId: voucher._id,
+            voucherName: voucher.voucherName || "Voucher",
+            voucherNumber:
+              voucher.number || voucher.invoiceNumber || voucher.voucherNumber || "",
+            date: voucher.date || null,
+            dateLabel: formatDateLabel(voucher.date),
+            lineIndex,
+            debit: effect < 0 ? Math.abs(effect) : 0,
+            credit: effect > 0 ? effect : 0,
+            narration: line.narration || voucher.narration || voucher.note || "",
+            counterpart: ledger.name,
+            itemName: "",
+            isSynthetic: false,
+          });
+        }
+      });
+    });
+
+    if (closingStock > 0) {
+      entries.push({
+        voucherId: null,
+        voucherName: "Closing Stock",
+        voucherNumber: "",
+        date: toDate || null,
+        dateLabel: formatDateLabel(toDate),
+        lineIndex: 0,
+        debit: closingStock,
+        credit: 0,
+        narration: "Closing stock valuation for the selected period.",
+        counterpart: "Inventory Valuation",
+        itemName: "",
+        isSynthetic: true,
+      });
+    }
+
+    const totalDebit = normalizeMoney(
+      entries.reduce((sum, entry) => sum + Number(entry.debit || 0), 0),
+    );
+    const totalCredit = normalizeMoney(
+      entries.reduce((sum, entry) => sum + Number(entry.credit || 0), 0),
+    );
+
+    let runningBalance = 0;
+    const entriesWithRunning = entries.map((entry) => {
+      runningBalance = normalizeMoney(
+        runningBalance + Number(entry.debit || 0) - Number(entry.credit || 0),
+      );
+      return {
+        ...entry,
+        runningBalance,
+      };
+    });
+
+    res.json({
+      ledger: {
+        ledgerId: "__profit_loss__",
+        ledgerName: "Profit & Loss A/c",
+        groupName: "Profit & Loss",
+      },
+      openingBalance: 0,
+      fixedOpeningBalance: 0,
+      movementBeforeFrom: 0,
+      totals: {
+        debit: totalDebit,
+        credit: totalCredit,
+      },
+      closingBalance: normalizeMoney(totalDebit - totalCredit),
+      entries: entriesWithRunning,
+    });
+  } catch (err) {
+    console.error("Error loading profit & loss drilldown:", err);
+    res.status(500).json({ message: "Error loading profit & loss drilldown" });
+  }
+});
+
 app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
@@ -7472,6 +7711,8 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
     }
 
     if (netProfit !== 0) {
+      const profitLossLedger =
+        ledgers.find((ledger) => nameKey(ledger.name || "") === "profit & loss a/c") || null;
       const profitLossGroup = groups.find(
         (group) => nameKey(group.name || "") === "profit & loss",
       );
@@ -7492,6 +7733,15 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
         ledgers: [],
       };
       current.amount = profitLossAmount;
+      current.ledgers = [
+        {
+          ledgerId: profitLossLedger?._id || "__profit_loss__",
+          ledgerName: profitLossLedger?.name || "Profit & Loss A/c",
+          openingAmount: 0,
+          amount: profitLossAmount,
+          virtualMode: "profit-loss",
+        },
+      ];
       targetCollection.set(targetGroupName, current);
     }
 
