@@ -6245,6 +6245,85 @@ app.put("/companies/:companyId/update-prices-by-group", async (req, res) => {
   }
 });
 
+app.put("/companies/:companyId/update-price-by-item", async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const { itemId, priceLevelId, rate, effectiveFrom } = req.body;
+
+    if (!companyId || !itemId || !priceLevelId || rate === undefined) {
+      return res.status(400).json({
+        message: "companyId, itemId, priceLevelId and rate are required",
+      });
+    }
+
+    if (isNaN(rate)) {
+      return res.status(400).json({ message: "Rate must be a number" });
+    }
+
+    let companyObjectId, itemObjectId;
+    try {
+      companyObjectId = new ObjectId(companyId);
+      itemObjectId = new ObjectId(itemId);
+    } catch (err) {
+      return res.status(400).json({ message: "Invalid ID format" });
+    }
+
+    const item = await Items.findOne({
+      _id: itemObjectId,
+      companyId: companyObjectId,
+    });
+
+    if (!item) {
+      return res.status(404).json({ message: "Item not found in company" });
+    }
+
+    const effectiveDate = safeDate(effectiveFrom) || new Date();
+    const effectiveDateKey = effectiveDate.toISOString().slice(0, 10);
+    const prices = Array.isArray(item.prices) ? [...item.prices] : [];
+
+    const existingIndex = prices.findIndex((entry) => {
+      const entryDateKey = entry?.effectiveFrom
+        ? new Date(entry.effectiveFrom).toISOString().slice(0, 10)
+        : "";
+      return (
+        entry?.priceLevelId === priceLevelId &&
+        entryDateKey === effectiveDateKey
+      );
+    });
+
+    if (existingIndex >= 0) {
+      prices[existingIndex] = {
+        ...prices[existingIndex],
+        rate: Number(rate),
+        effectiveFrom: effectiveDate,
+      };
+    } else {
+      prices.push({
+        priceLevelId,
+        rate: Number(rate),
+        effectiveFrom: effectiveDate,
+      });
+    }
+
+    await Items.updateOne(
+      { _id: itemObjectId, companyId: companyObjectId },
+      { $set: { prices } },
+    );
+
+    res.json({
+      message: "Item price update completed",
+      effectiveFrom: effectiveDateKey,
+      itemId,
+    });
+  } catch (err) {
+    console.error("Error updating item price:", err);
+    res.status(500).json({
+      message: "Item price update failed",
+      error: err.message,
+    });
+  }
+});
+
 // Delete item (guard: not used in vouchers)
 app.delete("/companies/:companyId/items/:itemId", async (req, res) => {
   try {
