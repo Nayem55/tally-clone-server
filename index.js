@@ -1086,7 +1086,9 @@ async function buildStockSummary(
         const purchaseRate = normalizeMoney(
           Number(line.rate) || state.currentRate || 0,
         );
-        const costRate = normalizeMoney(state.currentRate || purchaseRate || 0);
+        const outwardRate = normalizeMoney(
+          Number(line.rate) || state.currentRate || purchaseRate || 0,
+        );
 
         if (direction > 0) {
           if (beforePeriod) {
@@ -1108,7 +1110,7 @@ async function buildStockSummary(
             state.currentRate = purchaseRate;
           }
         } else {
-          const outwardValue = normalizeMoney(qty * costRate);
+          const outwardValue = normalizeMoney(qty * outwardRate);
 
           if (beforePeriod) {
             state.currentQty = normalizeMoney(state.currentQty - qty);
@@ -1265,6 +1267,8 @@ async function buildInventoryDetailReport(
             inwardValue: 0,
             outwardQty: 0,
             outwardValue: 0,
+            lastInwardRate: 0,
+            lastOutwardRate: 0,
           },
           lastInwardAt: null,
           lastOutwardAt: null,
@@ -1311,6 +1315,8 @@ async function buildInventoryDetailReport(
             inwardValue: 0,
             outwardQty: 0,
             outwardValue: 0,
+            lastInwardRate: 0,
+            lastOutwardRate: 0,
           },
           lastInwardAt: null,
           lastOutwardAt: null,
@@ -1324,8 +1330,11 @@ async function buildInventoryDetailReport(
         const purchaseRate = normalizeMoney(
           Number(line.rate) || state.currentRate || 0,
         );
+        const saleRate = normalizeMoney(Number(line.rate) || 0);
         const effectiveRate = normalizeMoney(
-          direction > 0 ? purchaseRate : state.currentRate || purchaseRate || 0,
+          direction > 0
+            ? purchaseRate
+            : saleRate || state.currentRate || purchaseRate || 0,
         );
         const value = normalizeMoney(qty * effectiveRate);
 
@@ -1345,6 +1354,7 @@ async function buildInventoryDetailReport(
             state.movement.inwardValue = normalizeMoney(
               state.movement.inwardValue + value,
             );
+            state.movement.lastInwardRate = effectiveRate;
             state.currentQty = normalizeMoney(state.currentQty + qty);
             state.currentRate = effectiveRate;
             state.lastInwardAt = voucher.date || state.lastInwardAt;
@@ -1385,6 +1395,7 @@ async function buildInventoryDetailReport(
             state.movement.outwardValue = normalizeMoney(
               state.movement.outwardValue + value,
             );
+            state.movement.lastOutwardRate = effectiveRate;
             state.currentQty = normalizeMoney(state.currentQty - qty);
             state.lastOutwardAt = voucher.date || state.lastOutwardAt;
             state.history.push({
@@ -1445,8 +1456,16 @@ async function buildInventoryDetailReport(
         openingRate,
         openingValue,
         inwardQty: normalizeMoney(state.movement.inwardQty),
+        inwardRate: normalizeMoney(state.movement.lastInwardRate || 0),
         inwardValue: normalizeMoney(state.movement.inwardValue),
         outwardQty: normalizeMoney(state.movement.outwardQty),
+        outwardRate:
+          Number(state.movement.outwardQty || 0) !== 0
+            ? normalizeMoney(
+                Number(state.movement.outwardValue || 0) /
+                  Number(state.movement.outwardQty || 0),
+              )
+            : 0,
         outwardValue: normalizeMoney(state.movement.outwardValue),
         closingQty,
         closingRate,
@@ -1935,7 +1954,7 @@ async function buildInventoryMovementDimensionReport(
 
         const qty = normalizeMoney(Number(line.qty) || 0);
         const rate = normalizeMoney(Number(line.rate) || 0);
-        const value = normalizeMoney(Number(line.amount) || qty * rate);
+        const value = normalizeMoney(qty * rate);
 
         if (beforePeriod) {
           state.metrics.openingQty = normalizeMoney(
