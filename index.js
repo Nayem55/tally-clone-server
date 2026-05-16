@@ -796,6 +796,151 @@ function flattenGroupTree(tree, level = 0) {
   return rows;
 }
 
+function buildProfitLossSnapshot({
+  balances,
+  vouchers,
+  stockSummary,
+  groupMap,
+  fromDate,
+  toDate,
+}) {
+  const incomes = [];
+  const expenses = [];
+
+  balances.forEach((ledger) => {
+    const group = groupMap.get(String(ledger.groupId)) || ledger.group;
+    const amount =
+      group?.nature === "INCOME"
+        ? normalizeMoney((ledger.credit || 0) - (ledger.debit || 0))
+        : normalizeMoney((ledger.debit || 0) - (ledger.credit || 0));
+
+    const row = {
+      ledgerId: ledger._id,
+      ledgerName: ledger.name,
+      groupName: group?.name || "",
+      amount: normalizeMoney(Math.max(amount, 0)),
+      affectsGrossProfit: Boolean(group?.affectsGrossProfit),
+    };
+
+    if (
+      group?.nature === "INCOME" &&
+      !row.affectsGrossProfit &&
+      row.amount > 0
+    ) {
+      incomes.push(row);
+    }
+
+    // Treat every EXPENSE nature ledger as an expense hit to profit,
+    // except purchase accounts because purchase/stock cost is already
+    // reflected through COGS in the trading section.
+    if (
+      group?.nature === "EXPENSE" &&
+      nameKey(group?.name || "") !== "purchase accounts" &&
+      row.amount > 0
+    ) {
+      expenses.push(row);
+    }
+  });
+
+  const periodVouchers = vouchers.filter((voucher) => {
+    const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+    return (
+      (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
+      (!toDate || (voucherDate && voucherDate <= toDate))
+    );
+  });
+
+  const voucherTotals = {
+    sales: 0,
+    salesReturns: 0,
+    purchases: 0,
+    purchaseReturns: 0,
+  };
+
+  periodVouchers.forEach((voucher) => {
+    const name = nameKey(voucher.voucherName || "");
+    const amount = voucherTotalAmount(voucher);
+    if (name === "sales" || name === "pos voucher") {
+      voucherTotals.sales = normalizeMoney(voucherTotals.sales + amount);
+    } else if (name === "credit note") {
+      voucherTotals.salesReturns = normalizeMoney(
+        voucherTotals.salesReturns + amount,
+      );
+    } else if (name === "purchase") {
+      voucherTotals.purchases = normalizeMoney(
+        voucherTotals.purchases + amount,
+      );
+    } else if (name === "debit note") {
+      voucherTotals.purchaseReturns = normalizeMoney(
+        voucherTotals.purchaseReturns + amount,
+      );
+    }
+  });
+
+  const openingStock = normalizeMoney(
+    (stockSummary.rows || []).reduce(
+      (sum, row) => sum + Number(row.openingValue || 0),
+      0,
+    ),
+  );
+  const closingStock = normalizeMoney(
+    (stockSummary.rows || []).reduce(
+      (sum, row) => sum + Number(row.closingValue || 0),
+      0,
+    ),
+  );
+  const netSales = normalizeMoney(
+    voucherTotals.sales - voucherTotals.salesReturns,
+  );
+  const netPurchases = normalizeMoney(
+    voucherTotals.purchases - voucherTotals.purchaseReturns,
+  );
+  const costOfGoodsSold = normalizeMoney(
+    openingStock + netPurchases - closingStock,
+  );
+  const grossProfit = normalizeMoney(netSales - costOfGoodsSold);
+  const indirectIncome = incomes.reduce(
+    (sum, row) => normalizeMoney(sum + row.amount),
+    0,
+  );
+  const totalExpense = expenses.reduce(
+    (sum, row) => normalizeMoney(sum + row.amount),
+    0,
+  );
+  const netProfit = normalizeMoney(
+    grossProfit + indirectIncome - totalExpense,
+  );
+  const profitMargin = netSales
+    ? normalizeMoney((netProfit / netSales) * 100)
+    : 0;
+
+  return {
+    incomes,
+    expenses,
+    trading: {
+      sales: voucherTotals.sales,
+      salesReturns: voucherTotals.salesReturns,
+      netSales,
+      openingStock,
+      purchases: voucherTotals.purchases,
+      purchaseReturns: voucherTotals.purchaseReturns,
+      netPurchases,
+      closingStock,
+      costOfGoodsSold,
+      grossProfit,
+    },
+    totals: {
+      grossIncome: netSales,
+      grossExpense: costOfGoodsSold,
+      grossProfit,
+      netIncome: indirectIncome,
+      netExpense: totalExpense,
+      netProfit,
+      profitMargin,
+    },
+  };
+}
+
 function findGroupNodeById(tree, targetId) {
   for (const node of tree || []) {
     if (String(node.id) === String(targetId)) return node;
@@ -7379,138 +7524,22 @@ app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
     );
     const groupMap = new Map(groups.map((group) => [String(group._id), group]));
 
-    const incomes = [];
-    const expenses = [];
-
-    balances.forEach((ledger) => {
-      const group = groupMap.get(String(ledger.groupId)) || ledger.group;
-      const amount =
-        group?.nature === "INCOME"
-          ? normalizeMoney((ledger.credit || 0) - (ledger.debit || 0))
-          : normalizeMoney((ledger.debit || 0) - (ledger.credit || 0));
-
-      const row = {
-        ledgerId: ledger._id,
-        ledgerName: ledger.name,
-        groupName: group?.name || "",
-        amount: normalizeMoney(Math.max(amount, 0)),
-        affectsGrossProfit: Boolean(group?.affectsGrossProfit),
-      };
-
-      if (
-        group?.nature === "INCOME" &&
-        !row.affectsGrossProfit &&
-        row.amount > 0
-      ) {
-        incomes.push(row);
-      }
-      if (
-        group?.nature === "EXPENSE" &&
-        !row.affectsGrossProfit &&
-        row.amount > 0
-      ) {
-        expenses.push(row);
-      }
+    const snapshot = buildProfitLossSnapshot({
+      balances,
+      vouchers,
+      stockSummary,
+      groupMap,
+      fromDate,
+      toDate,
     });
-
-    const periodVouchers = vouchers.filter((voucher) => {
-      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
-      return (
-        (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
-        (!toDate || (voucherDate && voucherDate <= toDate))
-      );
-    });
-
-    const voucherTotals = {
-      sales: 0,
-      salesReturns: 0,
-      purchases: 0,
-      purchaseReturns: 0,
-    };
-
-    periodVouchers.forEach((voucher) => {
-      const name = nameKey(voucher.voucherName || "");
-      const amount = voucherTotalAmount(voucher);
-      if (name === "sales" || name === "pos voucher") {
-        voucherTotals.sales = normalizeMoney(voucherTotals.sales + amount);
-      } else if (name === "credit note") {
-        voucherTotals.salesReturns = normalizeMoney(
-          voucherTotals.salesReturns + amount,
-        );
-      } else if (name === "purchase") {
-        voucherTotals.purchases = normalizeMoney(
-          voucherTotals.purchases + amount,
-        );
-      } else if (name === "debit note") {
-        voucherTotals.purchaseReturns = normalizeMoney(
-          voucherTotals.purchaseReturns + amount,
-        );
-      }
-    });
-
-    const openingStock = normalizeMoney(
-      (stockSummary.rows || []).reduce(
-        (sum, row) => sum + Number(row.openingValue || 0),
-        0,
-      ),
-    );
-    const closingStock = normalizeMoney(
-      (stockSummary.rows || []).reduce(
-        (sum, row) => sum + Number(row.closingValue || 0),
-        0,
-      ),
-    );
-    const netSales = normalizeMoney(
-      voucherTotals.sales - voucherTotals.salesReturns,
-    );
-    const netPurchases = normalizeMoney(
-      voucherTotals.purchases - voucherTotals.purchaseReturns,
-    );
-    const costOfGoodsSold = normalizeMoney(
-      openingStock + netPurchases - closingStock,
-    );
-    const grossProfit = normalizeMoney(netSales - costOfGoodsSold);
-    const indirectIncome = incomes.reduce(
-      (sum, row) => normalizeMoney(sum + row.amount),
-      0,
-    );
-    const indirectExpense = expenses.reduce(
-      (sum, row) => normalizeMoney(sum + row.amount),
-      0,
-    );
-    const netProfit = normalizeMoney(
-      grossProfit + indirectIncome - indirectExpense,
-    );
-    const profitMargin = netSales
-      ? normalizeMoney((netProfit / netSales) * 100)
-      : 0;
 
     res.json({
-      incomes: incomes.sort((a, b) => a.ledgerName.localeCompare(b.ledgerName)),
-      expenses: expenses.sort((a, b) =>
+      incomes: snapshot.incomes.sort((a, b) => a.ledgerName.localeCompare(b.ledgerName)),
+      expenses: snapshot.expenses.sort((a, b) =>
         a.ledgerName.localeCompare(b.ledgerName),
       ),
-      trading: {
-        sales: voucherTotals.sales,
-        salesReturns: voucherTotals.salesReturns,
-        netSales,
-        openingStock,
-        purchases: voucherTotals.purchases,
-        purchaseReturns: voucherTotals.purchaseReturns,
-        netPurchases,
-        closingStock,
-        costOfGoodsSold,
-        grossProfit,
-      },
-      totals: {
-        grossIncome: netSales,
-        grossExpense: costOfGoodsSold,
-        grossProfit,
-        netIncome: indirectIncome,
-        netExpense: indirectExpense,
-        netProfit,
-        profitMargin,
-      },
+      trading: snapshot.trading,
+      totals: snapshot.totals,
     });
   } catch (err) {
     console.error("Error building profit and loss:", err);
@@ -7607,108 +7636,15 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
       }
     });
 
-    const incomes = [];
-    const expenses = [];
-
-    balances.forEach((ledger) => {
-      const group = groupMap.get(String(ledger.groupId)) || ledger.group;
-      const amount =
-        group?.nature === "INCOME"
-          ? normalizeMoney((ledger.credit || 0) - (ledger.debit || 0))
-          : normalizeMoney((ledger.debit || 0) - (ledger.credit || 0));
-
-      const row = {
-        ledgerId: ledger._id,
-        ledgerName: ledger.name,
-        groupName: group?.name || "",
-        amount: normalizeMoney(Math.max(amount, 0)),
-        affectsGrossProfit: Boolean(group?.affectsGrossProfit),
-      };
-
-      if (
-        group?.nature === "INCOME" &&
-        !row.affectsGrossProfit &&
-        row.amount > 0
-      ) {
-        incomes.push(row);
-      }
-      if (
-        group?.nature === "EXPENSE" &&
-        !row.affectsGrossProfit &&
-        row.amount > 0
-      ) {
-        expenses.push(row);
-      }
+    const snapshot = buildProfitLossSnapshot({
+      balances,
+      vouchers,
+      stockSummary,
+      groupMap,
+      fromDate,
+      toDate,
     });
-
-    const periodVouchers = vouchers.filter((voucher) => {
-      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
-      return (
-        (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
-        (!toDate || (voucherDate && voucherDate <= toDate))
-      );
-    });
-
-    const voucherTotals = {
-      sales: 0,
-      salesReturns: 0,
-      purchases: 0,
-      purchaseReturns: 0,
-    };
-
-    periodVouchers.forEach((voucher) => {
-      const name = nameKey(voucher.voucherName || "");
-      const amount = voucherTotalAmount(voucher);
-      if (name === "sales" || name === "pos voucher") {
-        voucherTotals.sales = normalizeMoney(voucherTotals.sales + amount);
-      } else if (name === "credit note") {
-        voucherTotals.salesReturns = normalizeMoney(
-          voucherTotals.salesReturns + amount,
-        );
-      } else if (name === "purchase") {
-        voucherTotals.purchases = normalizeMoney(
-          voucherTotals.purchases + amount,
-        );
-      } else if (name === "debit note") {
-        voucherTotals.purchaseReturns = normalizeMoney(
-          voucherTotals.purchaseReturns + amount,
-        );
-      }
-    });
-
-    const openingStock = normalizeMoney(
-      (stockSummary.rows || []).reduce(
-        (sum, row) => sum + Number(row.openingValue || 0),
-        0,
-      ),
-    );
-    const closingStock = normalizeMoney(
-      (stockSummary.rows || []).reduce(
-        (sum, row) => sum + Number(row.closingValue || 0),
-        0,
-      ),
-    );
-    const netSales = normalizeMoney(
-      voucherTotals.sales - voucherTotals.salesReturns,
-    );
-    const netPurchases = normalizeMoney(
-      voucherTotals.purchases - voucherTotals.purchaseReturns,
-    );
-    const costOfGoodsSold = normalizeMoney(
-      openingStock + netPurchases - closingStock,
-    );
-    const grossProfit = normalizeMoney(netSales - costOfGoodsSold);
-    const indirectIncome = incomes.reduce(
-      (sum, row) => normalizeMoney(sum + row.amount),
-      0,
-    );
-    const indirectExpense = expenses.reduce(
-      (sum, row) => normalizeMoney(sum + row.amount),
-      0,
-    );
-    const netProfit = normalizeMoney(
-      grossProfit + indirectIncome - indirectExpense,
-    );
+    const netProfit = snapshot.totals.netProfit;
 
     if (
       stockSummary?.totals?.openingValue ||
