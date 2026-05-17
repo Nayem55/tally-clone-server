@@ -1934,7 +1934,6 @@ async function buildInventoryMovementDimensionReport(
     fromDate,
     toDate,
     {
-      excludeRoles: ["raw_material"],
       salesPersonId: options.salesPersonId,
       groupId: options.groupId,
       category: options.category,
@@ -7795,15 +7794,10 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
         (group) => nameKey(group.name || "") === "profit & loss",
       );
       const profitLossAmount = normalizeMoney(Math.abs(netProfit));
-      const targetCollection =
-        profitLossGroup?.nature === "ASSET"
-          ? assets
-          : profitLossGroup?.nature === "LIABILITY"
-            ? liabilities
-            : netProfit >= 0
-              ? liabilities
-              : assets;
+      const targetCollection = netProfit >= 0 ? liabilities : assets;
+      const oppositeCollection = netProfit >= 0 ? assets : liabilities;
       const targetGroupName = profitLossGroup?.name || "Profit & Loss";
+      oppositeCollection.delete(targetGroupName);
       const current = targetCollection.get(targetGroupName) || {
         groupName: targetGroupName,
         openingAmount: 0,
@@ -7811,12 +7805,14 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
         ledgers: [],
       };
       current.amount = profitLossAmount;
+      current.pnlType = netProfit >= 0 ? "profit" : "loss";
       current.ledgers = [
         {
           ledgerId: profitLossLedger?._id || "__profit_loss__",
           ledgerName: profitLossLedger?.name || "Profit & Loss A/c",
           openingAmount: 0,
           amount: profitLossAmount,
+          pnlType: netProfit >= 0 ? "profit" : "loss",
           virtualMode: "profit-loss",
         },
       ];
