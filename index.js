@@ -7704,21 +7704,54 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
     );
     const groupMap = new Map(groups.map((group) => [String(group._id), group]));
 
-    const assets = new Map();
-    const liabilities = new Map();
+    const assetNodes = new Map();
+    const liabilityNodes = new Map();
+
+    function ensureBalanceNode(sideMap, group) {
+      const key = String(group._id);
+      if (!sideMap.has(key)) {
+        sideMap.set(key, {
+          id: group._id,
+          groupName: group.name,
+          parentId: group.parentId || null,
+          nature: group.nature,
+          openingAmount: 0,
+          amount: 0,
+          ledgers: [],
+          children: [],
+        });
+      }
+      return sideMap.get(key);
+    }
+
+    function ensureAncestorChain(sideMap, group, nature) {
+      let currentGroup = group;
+      let lowestNode = null;
+      let targetNode = null;
+
+      while (currentGroup && currentGroup.nature === nature) {
+        const currentNode = ensureBalanceNode(sideMap, currentGroup);
+        if (!targetNode) {
+          targetNode = currentNode;
+        }
+        if (lowestNode && !currentNode.children.some((child) => String(child.id) === String(lowestNode.id))) {
+          currentNode.children.push(lowestNode);
+        }
+        lowestNode = currentNode;
+        currentGroup = currentGroup.parentId
+          ? groupMap.get(String(currentGroup.parentId))
+          : null;
+      }
+
+      return targetNode;
+    }
 
     balances.forEach((ledger) => {
       const group = groupMap.get(String(ledger.groupId)) || ledger.group;
       if (!group) return;
 
       if (group.nature === "ASSET") {
-        const key = group.name;
-        const current = assets.get(key) || {
-          groupName: key,
-          openingAmount: 0,
-          amount: 0,
-          ledgers: [],
-        };
+        const current = ensureAncestorChain(assetNodes, group, "ASSET");
         current.openingAmount = normalizeMoney(
           current.openingAmount + (ledger.openingDebit || 0),
         );
@@ -7726,22 +7759,15 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
           current.amount + (ledger.closingDebit || 0),
         );
         current.ledgers.push({
-          ledgerId: ledger._id,
-          ledgerName: ledger.name,
-          openingAmount: normalizeMoney(ledger.openingDebit || 0),
-          amount: normalizeMoney(ledger.closingDebit || 0),
-        });
-        assets.set(key, current);
+            ledgerId: ledger._id,
+            ledgerName: ledger.name,
+            openingAmount: normalizeMoney(ledger.openingDebit || 0),
+            amount: normalizeMoney(ledger.closingDebit || 0),
+          });
       }
 
       if (group.nature === "LIABILITY") {
-        const key = group.name;
-        const current = liabilities.get(key) || {
-          groupName: key,
-          openingAmount: 0,
-          amount: 0,
-          ledgers: [],
-        };
+        const current = ensureAncestorChain(liabilityNodes, group, "LIABILITY");
         current.openingAmount = normalizeMoney(
           current.openingAmount + (ledger.openingCredit || 0),
         );
@@ -7749,14 +7775,52 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
           current.amount + (ledger.closingCredit || 0),
         );
         current.ledgers.push({
-          ledgerId: ledger._id,
-          ledgerName: ledger.name,
-          openingAmount: normalizeMoney(ledger.openingCredit || 0),
-          amount: normalizeMoney(ledger.closingCredit || 0),
-        });
-        liabilities.set(key, current);
+            ledgerId: ledger._id,
+            ledgerName: ledger.name,
+            openingAmount: normalizeMoney(ledger.openingCredit || 0),
+            amount: normalizeMoney(ledger.closingCredit || 0),
+          });
       }
     });
+
+    function buildHierarchy(sideMap, nature) {
+      const nodes = [...sideMap.values()].map((node) => ({
+        ...node,
+        children: [],
+        ledgers: node.ledgers
+          .slice()
+          .sort((left, right) => left.ledgerName.localeCompare(right.ledgerName)),
+      }));
+      const nodeById = new Map(nodes.map((node) => [String(node.id), node]));
+      const roots = [];
+
+      nodes.forEach((node) => {
+        const parent = node.parentId ? nodeById.get(String(node.parentId)) : null;
+        const parentGroup = node.parentId ? groupMap.get(String(node.parentId)) : null;
+        if (parent && parentGroup?.nature === nature) {
+          parent.children.push(node);
+        } else {
+          roots.push(node);
+        }
+      });
+
+      function rollup(node) {
+        node.children
+          .sort((left, right) => left.groupName.localeCompare(right.groupName))
+          .forEach((child) => {
+            rollup(child);
+            node.openingAmount = normalizeMoney(
+              node.openingAmount + Number(child.openingAmount || 0),
+            );
+            node.amount = normalizeMoney(node.amount + Number(child.amount || 0));
+          });
+      }
+
+      roots
+        .sort((left, right) => left.groupName.localeCompare(right.groupName))
+        .forEach(rollup);
+      return roots;
+    }
 
     const snapshot = buildProfitLossSnapshot({
       balances,
@@ -7772,11 +7836,15 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
       stockSummary?.totals?.openingValue ||
       stockSummary?.totals?.closingValue
     ) {
-      const current = assets.get("Closing Stock") || {
+      const current = {
+        id: "__closing_stock__",
         groupName: "Closing Stock",
+        parentId: null,
+        nature: "ASSET",
         openingAmount: 0,
         amount: 0,
         ledgers: [],
+        children: [],
       };
       current.openingAmount = normalizeMoney(
         current.openingAmount + Number(stockSummary.totals.openingValue || 0),
@@ -7784,7 +7852,7 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
       current.amount = normalizeMoney(
         current.amount + Number(stockSummary.totals.closingValue || 0),
       );
-      assets.set("Closing Stock", current);
+      assetNodes.set(String(current.id), current);
     }
 
     if (netProfit !== 0) {
@@ -7794,15 +7862,22 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
         (group) => nameKey(group.name || "") === "profit & loss",
       );
       const profitLossAmount = normalizeMoney(Math.abs(netProfit));
-      const targetCollection = netProfit >= 0 ? liabilities : assets;
-      const oppositeCollection = netProfit >= 0 ? assets : liabilities;
+      const targetCollection = netProfit >= 0 ? liabilityNodes : assetNodes;
+      const oppositeCollection = netProfit >= 0 ? assetNodes : liabilityNodes;
       const targetGroupName = profitLossGroup?.name || "Profit & Loss";
-      oppositeCollection.delete(targetGroupName);
-      const current = targetCollection.get(targetGroupName) || {
+      const targetKey = profitLossGroup?._id
+        ? String(profitLossGroup._id)
+        : "__profit_loss_group__";
+      oppositeCollection.delete(targetKey);
+      const current = targetCollection.get(targetKey) || {
+        id: profitLossGroup?._id || "__profit_loss_group__",
         groupName: targetGroupName,
+        parentId: profitLossGroup?.parentId || null,
+        nature: netProfit >= 0 ? "LIABILITY" : "ASSET",
         openingAmount: 0,
         amount: 0,
         ledgers: [],
+        children: [],
       };
       current.amount = profitLossAmount;
       current.pnlType = netProfit >= 0 ? "profit" : "loss";
@@ -7816,36 +7891,32 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
           virtualMode: "profit-loss",
         },
       ];
-      targetCollection.set(targetGroupName, current);
+      targetCollection.set(targetKey, current);
     }
 
-    const assetRows = [...assets.values()].sort((a, b) =>
-      a.groupName.localeCompare(b.groupName),
-    );
-    const liabilityRows = [...liabilities.values()].sort((a, b) =>
-      a.groupName.localeCompare(b.groupName),
-    );
+    const assetRows = buildHierarchy(assetNodes, "ASSET");
+    const liabilityRows = buildHierarchy(liabilityNodes, "LIABILITY");
+
+    function sumRows(rows) {
+      return rows.reduce(
+        (sum, row) => ({
+          opening: normalizeMoney(sum.opening + Number(row.openingAmount || 0)),
+          closing: normalizeMoney(sum.closing + Number(row.amount || 0)),
+        }),
+        { opening: 0, closing: 0 },
+      );
+    }
+    const assetTotals = sumRows(assetRows);
+    const liabilityTotals = sumRows(liabilityRows);
 
     res.json({
       assets: assetRows,
       liabilities: liabilityRows,
       totals: {
-        openingAssets: assetRows.reduce(
-          (sum, row) => normalizeMoney(sum + Number(row.openingAmount || 0)),
-          0,
-        ),
-        openingLiabilities: liabilityRows.reduce(
-          (sum, row) => normalizeMoney(sum + Number(row.openingAmount || 0)),
-          0,
-        ),
-        assets: assetRows.reduce(
-          (sum, row) => normalizeMoney(sum + Number(row.amount || 0)),
-          0,
-        ),
-        liabilities: liabilityRows.reduce(
-          (sum, row) => normalizeMoney(sum + Number(row.amount || 0)),
-          0,
-        ),
+        openingAssets: assetTotals.opening,
+        openingLiabilities: liabilityTotals.opening,
+        assets: assetTotals.closing,
+        liabilities: liabilityTotals.closing,
       },
       period: {
         from: fromDate ? dayjs(fromDate).format("YYYY-MM-DD") : null,
