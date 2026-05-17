@@ -7425,7 +7425,6 @@ app.get(
         fromDate,
         toDate,
         {
-          excludeRoles: ["raw_material"],
           salesPersonId: req.query.salesPersonId || "",
           groupId: req.query.groupId || "",
           category: req.query.category || "",
@@ -7453,7 +7452,6 @@ app.get(
         fromDate,
         toDate,
         {
-          excludeRoles: ["raw_material"],
           salesPersonId: req.query.salesPersonId || "",
           groupId: req.query.groupId || "",
           category: req.query.category || "",
