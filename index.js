@@ -3268,6 +3268,131 @@ async function buildComponentConsumptionReport(
   return { rows, totals };
 }
 
+function summarizeBomBottleneck(bom = {}) {
+  const components = Array.isArray(bom.components) ? bom.components : [];
+  const constrained = components.filter(
+    (component) => component.requiredPerUnit > 0 && component.possibleOutput !== null,
+  );
+
+  if (constrained.length === 0) {
+    return {
+      bottleneckName: "",
+      bottleneckAvailableQty: 0,
+      bottleneckPossibleOutput: 0,
+      readiness: "Blocked",
+    };
+  }
+
+  const bottleneck = constrained.reduce((lowest, component) => {
+    if (!lowest) return component;
+    return Number(component.possibleOutput || 0) <
+      Number(lowest.possibleOutput || 0)
+      ? component
+      : lowest;
+  }, null);
+
+  const possible = Number(bottleneck?.possibleOutput || 0);
+  return {
+    bottleneckName: bottleneck?.itemName || "",
+    bottleneckAvailableQty: normalizeMoney(bottleneck?.availableQty || 0),
+    bottleneckPossibleOutput: normalizeMoney(possible),
+    readiness: possible > 0 ? "Ready" : "Blocked",
+  };
+}
+
+async function buildManufacturingDashboard(companyId) {
+  await ensureCompanyCoreMasters(companyId);
+
+  const [rawSummary, bomRows] = await Promise.all([
+    buildStockSummary(companyId, null, null, {
+      includeRoles: ["raw_material"],
+    }),
+    Boms.find({ companyId }).sort({ updatedAt: -1, createdAt: -1 }).toArray(),
+  ]);
+
+  const enrichedBoms = await Promise.all(
+    bomRows.map((row) => enrichBomWithAvailability(companyId, row, rawSummary)),
+  );
+
+  const activeBoms = enrichedBoms.filter(
+    (row) => nameKey(row.status || "active") !== "inactive",
+  );
+  const readyBoms = activeBoms.filter((row) => Number(row.maxProducible || 0) > 0);
+  const blockedBoms = activeBoms.filter((row) => Number(row.maxProducible || 0) <= 0);
+
+  const bomCapacityRows = activeBoms
+    .map((bom) => {
+      const bottleneck = summarizeBomBottleneck(bom);
+      return {
+        _id: bom._id,
+        name: bom.name,
+        finishedItemId: bom.finishedItemId || null,
+        finishedItemName: bom.finishedItemName || "",
+        outputQty: normalizeMoney(bom.outputQty || 0),
+        unitName: bom.unitName || "",
+        componentsCount: Array.isArray(bom.components) ? bom.components.length : 0,
+        maxProducible: normalizeMoney(bom.maxProducible || 0),
+        effectiveRate: normalizeMoney(bom.effectiveRate || 0),
+        totalCost: normalizeMoney(bom.totalCost || 0),
+        additionalCost: normalizeMoney(bom.additionalCost || 0),
+        bottleneckName: bottleneck.bottleneckName,
+        bottleneckAvailableQty: bottleneck.bottleneckAvailableQty,
+        bottleneckPossibleOutput: bottleneck.bottleneckPossibleOutput,
+        readiness: bottleneck.readiness,
+        status: bom.status || "active",
+      };
+    })
+    .sort((left, right) => {
+      if (left.readiness !== right.readiness) {
+        return left.readiness === "Ready" ? -1 : 1;
+      }
+      return Number(right.maxProducible || 0) - Number(left.maxProducible || 0);
+    });
+
+  const rawMaterialRows = (rawSummary.rows || [])
+    .map((row) => ({
+      itemId: row.itemId,
+      itemName: row.itemName || "",
+      groupName: row.groupName || "",
+      closingQty: normalizeMoney(row.closingQty || 0),
+      closingRate: normalizeMoney(row.closingRate || 0),
+      closingValue: normalizeMoney(row.closingValue || 0),
+      inwardQty: normalizeMoney(row.inwardQty || 0),
+      outwardQty: normalizeMoney(row.outwardQty || 0),
+    }))
+    .sort((left, right) => Number(right.closingValue || 0) - Number(left.closingValue || 0));
+
+  const topRawMaterials = rawMaterialRows.slice(0, 8);
+  const topBuildOpportunities = bomCapacityRows.slice(0, 8);
+
+  return {
+    generatedAt: new Date(),
+    rawMaterials: {
+      itemsCount: rawMaterialRows.length,
+      closingQty: normalizeMoney(rawSummary.totals?.closingQty || 0),
+      closingValue: normalizeMoney(rawSummary.totals?.closingValue || 0),
+      inwardValue: normalizeMoney(rawSummary.totals?.inwardValue || 0),
+      consumedValue: normalizeMoney(rawSummary.totals?.outwardValue || 0),
+      rows: rawMaterialRows,
+      topRows: topRawMaterials,
+    },
+    boms: {
+      total: bomRows.length,
+      active: activeBoms.length,
+      ready: readyBoms.length,
+      blocked: blockedBoms.length,
+      rows: bomCapacityRows,
+      topRows: topBuildOpportunities,
+    },
+    notes: {
+      capacityBasis:
+        "BoM capacity is calculated against current raw material closing stock for each BoM independently.",
+      caution:
+        "Shared raw materials can be consumed by multiple BoMs, so simultaneous total output across all BoMs may be lower than the sum of individual capacities.",
+    },
+  };
+}
+
 // ---------- CONNECT MONGODB ----------
 async function connectDb() {
   const client = new MongoClient(MONGO_URI);
@@ -7994,6 +8119,16 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
   } catch (err) {
     console.error("Error loading dashboard report:", err);
     res.status(500).json({ message: "Error loading dashboard report" });
+  }
+});
+
+app.get("/companies/:companyId/reports/manufacturing-dashboard", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    res.json(await buildManufacturingDashboard(companyId));
+  } catch (err) {
+    console.error("Error loading manufacturing dashboard report:", err);
+    res.status(500).json({ message: "Error loading manufacturing dashboard report" });
   }
 });
 
