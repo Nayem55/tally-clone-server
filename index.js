@@ -323,6 +323,28 @@ function voucherTotalAmount(voucher) {
   return 0;
 }
 
+function getAccountingReportLines(voucher) {
+  const voucherNameKey = nameKey(voucher?.voucherName || "");
+  const shouldSwapDebitCredit =
+    voucherNameKey === "credit note" || voucherNameKey === "debit note";
+
+  return (voucher?.lines || []).map((line, lineIndex) => {
+    let debit = Number(line?.debit || 0);
+    let credit = Number(line?.credit || 0);
+
+    if (shouldSwapDebitCredit) {
+      [debit, credit] = [credit, debit];
+    }
+
+    return {
+      ...line,
+      debit: normalizeMoney(debit),
+      credit: normalizeMoney(credit),
+      __reportLineIndex: lineIndex,
+    };
+  });
+}
+
 function escapeRegex(value = "") {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -682,7 +704,7 @@ function summarizeLedgerBalances(ledgers, vouchers, fromDate, toDate) {
       (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
       (!toDate || (voucherDate && voucherDate <= toDate));
 
-    (voucher.lines || []).forEach((line) => {
+    getAccountingReportLines(voucher).forEach((line) => {
       const ledgerKey = String(line.ledgerId);
       if (beforePeriod) {
         const current = openingMap.get(ledgerKey) || 0;
@@ -1600,10 +1622,11 @@ async function buildInventoryDetailReport(
             };
           } else if (inPeriod) {
             state.movement.inwardQty = normalizeMoney(
-              state.movement.inwardQty + direction * qty,
+              state.movement.inwardQty + (partyMovement ? direction * qty : qty),
             );
             state.movement.inwardValue = normalizeMoney(
-              state.movement.inwardValue + direction * value,
+              state.movement.inwardValue +
+                (partyMovement ? direction * value : value),
             );
             state.movement.lastInwardRate = effectiveRate;
             state.currentQty = normalizeMoney(state.currentQty + direction * qty);
@@ -1620,9 +1643,9 @@ async function buildInventoryDetailReport(
                 voucher.voucherNumber ||
                 "",
               direction: partyMovement?.directionLabel || "IN",
-              qty: normalizeMoney(direction * qty),
+              qty: normalizeMoney(partyMovement ? direction * qty : qty),
               rate: effectiveRate,
-              value: normalizeMoney(direction * value),
+              value: normalizeMoney(partyMovement ? direction * value : value),
               closingQty: state.currentQty,
               closingRate: state.currentRate,
               closingValue: normalizeMoney(
@@ -1637,7 +1660,7 @@ async function buildInventoryDetailReport(
           }
         } else {
           if (beforePeriod) {
-            state.currentQty = normalizeMoney(state.currentQty - direction * qty);
+            state.currentQty = normalizeMoney(state.currentQty + direction * qty);
             state.openingSnapshot = {
               qty: state.currentQty,
               rate: state.currentRate,
@@ -1645,13 +1668,14 @@ async function buildInventoryDetailReport(
             };
           } else if (inPeriod) {
             state.movement.outwardQty = normalizeMoney(
-              state.movement.outwardQty + direction * qty,
+              state.movement.outwardQty + (partyMovement ? direction * qty : qty),
             );
             state.movement.outwardValue = normalizeMoney(
-              state.movement.outwardValue + direction * value,
+              state.movement.outwardValue +
+                (partyMovement ? direction * value : value),
             );
             state.movement.lastOutwardRate = effectiveRate;
-            state.currentQty = normalizeMoney(state.currentQty - direction * qty);
+            state.currentQty = normalizeMoney(state.currentQty + direction * qty);
             state.lastOutwardAt = voucher.date || state.lastOutwardAt;
             state.history.push({
               voucherId: voucher._id,
@@ -1664,9 +1688,9 @@ async function buildInventoryDetailReport(
                 voucher.voucherNumber ||
                 "",
               direction: partyMovement?.directionLabel || "OUT",
-              qty: normalizeMoney(direction * qty),
+              qty: normalizeMoney(partyMovement ? direction * qty : qty),
               rate: effectiveRate,
-              value: normalizeMoney(direction * value),
+              value: normalizeMoney(partyMovement ? direction * value : value),
               closingQty: state.currentQty,
               closingRate: state.currentRate,
               closingValue: normalizeMoney(
@@ -2244,17 +2268,20 @@ async function buildInventoryMovementDimensionReport(
         if (inPeriod) {
           if (bucket === "inward") {
             state.metrics.inwardQty = normalizeMoney(
-              state.metrics.inwardQty + direction * qty,
+              state.metrics.inwardQty + (partyMovement ? direction * qty : qty),
             );
             state.metrics.inwardValue = normalizeMoney(
-              state.metrics.inwardValue + direction * value,
+              state.metrics.inwardValue +
+                (partyMovement ? direction * value : value),
             );
           } else {
             state.metrics.outwardQty = normalizeMoney(
-              state.metrics.outwardQty + direction * qty,
+              state.metrics.outwardQty +
+                (partyMovement ? direction * qty : qty),
             );
             state.metrics.outwardValue = normalizeMoney(
-              state.metrics.outwardValue + direction * value,
+              state.metrics.outwardValue +
+                (partyMovement ? direction * value : value),
             );
           }
         }
@@ -5832,7 +5859,9 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
           (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
           (!toDate || (voucherDate && voucherDate <= toDate));
 
-        (voucher.lines || []).forEach((line, lineIndex) => {
+        const reportLines = getAccountingReportLines(voucher);
+
+        reportLines.forEach((line, lineIndex) => {
           if (String(line.ledgerId) !== String(ledgerId)) return;
 
           const debit = Number(line.debit || 0);
@@ -5851,7 +5880,7 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
             const counterpart = (voucher.lines || [])
               .filter(
                 (otherLine, otherIndex) =>
-                  otherIndex !== lineIndex &&
+                  otherIndex !== (line.__reportLineIndex ?? lineIndex) &&
                   String(otherLine.ledgerId) !== String(ledgerId),
               )
               .map(
