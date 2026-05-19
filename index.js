@@ -4,6 +4,7 @@ const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const dayjs = require("dayjs");
 const { default: axios } = require("axios");
+const crypto = require("crypto");
 
 require("dotenv").config();
 
@@ -67,6 +68,41 @@ function normalizeMoney(value) {
 
 function normalizePhone(value = "") {
   return String(value || "").replace(/\D/g, "");
+}
+
+function hashCompanyPassword(password = "") {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const iterations = 120000;
+  const digest = "sha512";
+  const hash = crypto
+    .pbkdf2Sync(String(password), salt, iterations, 64, digest)
+    .toString("hex");
+  return { salt, hash, iterations, digest };
+}
+
+function verifyCompanyPassword(password = "", auth = {}) {
+  if (!auth?.salt || !auth?.hash) return false;
+  const derived = crypto.pbkdf2Sync(
+    String(password),
+    auth.salt,
+    Number(auth.iterations || 120000),
+    64,
+    auth.digest || "sha512"
+  );
+  const expected = Buffer.from(auth.hash, "hex");
+  if (derived.length !== expected.length) return false;
+  return crypto.timingSafeEqual(derived, expected);
+}
+
+function sanitizeCompany(company) {
+  if (!company) return null;
+  const auth = company.auth || {};
+  const { auth: _auth, ...rest } = company;
+  return {
+    ...rest,
+    requiresCompanyLogin: Boolean(auth.enabled && auth.masterUsername),
+    masterUsername: auth.enabled ? auth.masterUsername || "" : "",
+  };
 }
 
 function splitBalance(amount) {
@@ -1359,8 +1395,9 @@ async function buildInventoryDetailReport(
   toDate = null,
   options = {},
 ) {
-  const [groups, allItems, vouchers] = await Promise.all([
+  const [groups, ledgers, allItems, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
+    Ledgers.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
     Vouchers.find({
       companyId,
@@ -1374,6 +1411,12 @@ async function buildInventoryDetailReport(
   const requestedItemId = options.itemId ? String(options.itemId) : "";
   const requestedSalesPersonId = options.salesPersonId
     ? String(options.salesPersonId)
+    : "";
+  const requestedPartyGroupId = options.partyGroupId
+    ? String(options.partyGroupId)
+    : "";
+  const requestedPartyLedgerId = options.partyLedgerId
+    ? String(options.partyLedgerId)
     : "";
 
   const items = allItems.filter((item) => {
@@ -1392,6 +1435,20 @@ async function buildInventoryDetailReport(
   });
   const itemIdSet = new Set(items.map((item) => String(item._id)));
   const groupsById = new Map(groups.map((group) => [String(group._id), group]));
+  const ledgerById = new Map(ledgers.map((ledger) => [String(ledger._id), ledger]));
+
+  function isDescendantGroup(groupIdValue, ancestorGroupId) {
+    if (!ancestorGroupId) return true;
+    let currentKey = String(groupIdValue || "");
+    const targetKey = String(ancestorGroupId || "");
+    while (currentKey) {
+      if (currentKey === targetKey) return true;
+      const currentGroup = groupsById.get(currentKey);
+      currentKey = currentGroup?.parentId ? String(currentGroup.parentId) : "";
+    }
+    return false;
+  }
+
   const itemStateMap = new Map(
     items.map((item) => {
       const openingQty = normalizeMoney(Number(item.openingQty) || 0);
@@ -1431,9 +1488,26 @@ async function buildInventoryDetailReport(
       return leftTime - rightTime;
     })
     .forEach((voucher) => {
+      const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
+      const partyLedgerId = String(partyLedger?._id || "");
+      const partyGroupId = String(partyLedger?.groupId || "");
+      const partyGroupName =
+        groupsById.get(partyGroupId)?.name ||
+        normalizeName(voucher.customerSnapshot?.name || "") ||
+        "";
+
       if (requestedSalesPersonId) {
         if (!isSalesPersonTrackedVoucherName(voucher.voucherName)) return;
         if (!voucherMatchesSalesPerson(voucher, requestedSalesPersonId)) return;
+      }
+      if (requestedPartyLedgerId && partyLedgerId !== requestedPartyLedgerId) {
+        return;
+      }
+      if (
+        requestedPartyGroupId &&
+        !isDescendantGroup(partyGroupId, requestedPartyGroupId)
+      ) {
+        return;
       }
       if (!Array.isArray(voucher.inventoryLines)) return;
 
@@ -1523,6 +1597,10 @@ async function buildInventoryDetailReport(
                 state.currentQty * state.currentRate,
               ),
               itemName: normalizeName(line.itemName || state.item?.name || ""),
+              partyLedgerId,
+              partyLedgerName: normalizeName(partyLedger?.name || ""),
+              partyGroupId,
+              partyGroupName: normalizeName(partyGroupName),
             });
           }
         } else {
@@ -1563,6 +1641,10 @@ async function buildInventoryDetailReport(
                 state.currentQty * state.currentRate,
               ),
               itemName: normalizeName(line.itemName || state.item?.name || ""),
+              partyLedgerId,
+              partyLedgerName: normalizeName(partyLedger?.name || ""),
+              partyGroupId,
+              partyGroupName: normalizeName(partyGroupName),
             });
           }
         }
@@ -2091,7 +2173,6 @@ async function buildInventoryMovementDimensionReport(
       voucher.inventoryLines.forEach((line) => {
         if (!line?.itemId) return;
         const item = itemMap.get(String(line.itemId)) || {};
-        if (inventoryRoleKey(item.inventoryRole) === "raw_material") return;
 
         const direction = getInventoryLineDirection(line, voucher.voucherName);
         if (direction === 0) return;
@@ -2549,23 +2630,13 @@ async function buildPartyMovementDetailReport(
       name: partyLedger.name || "Unnamed Ledger",
       groupId: partyGroupId,
       groupPath: getGroupPath(partyGroupId),
-      metrics: {
-        purchaseQty: 0,
-        purchaseValue: 0,
-        salesQty: 0,
-        salesValue: 0,
-        invoiceCount: 0,
-        averagePurchaseRate: 0,
-        averageSaleRate: 0,
-        lastVoucherOn: null,
-      },
+      metrics: emptyMovementAccumulator(),
       invoiceIds: new Set(),
       voucherRows: [],
     };
 
     (voucher.inventoryLines || []).forEach((line, index) => {
       const item = itemMap.get(String(line.itemId)) || {};
-      if (inventoryRoleKey(item.inventoryRole) === "raw_material") return;
 
       const direction = getInventoryLineDirection(line, voucher.voucherName);
       if (direction === 0) return;
@@ -2573,59 +2644,66 @@ async function buildPartyMovementDetailReport(
       const qty = normalizeMoney(Number(line.qty || 0));
       const rate = normalizeMoney(Number(line.rate || 0));
       const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
+      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+      const beforePeriod =
+        fromDate && voucherDate ? voucherDate < fromDate : false;
+      const inPeriod =
+        !fromDate ||
+        (voucherDate &&
+          voucherDate >= fromDate &&
+          (!toDate || voucherDate <= toDate));
 
-      if (direction > 0) {
-        state.metrics.purchaseQty = normalizeMoney(
-          state.metrics.purchaseQty + qty,
+      if (beforePeriod) {
+        state.metrics.openingQty = normalizeMoney(
+          state.metrics.openingQty + (direction > 0 ? qty : -qty),
         );
-        state.metrics.purchaseValue = normalizeMoney(
-          state.metrics.purchaseValue + value,
+        state.metrics.openingValue = normalizeMoney(
+          state.metrics.openingValue + (direction > 0 ? value : -value),
         );
+      } else if (inPeriod) {
+        if (direction > 0) {
+          state.metrics.inwardQty = normalizeMoney(
+            state.metrics.inwardQty + qty,
+          );
+          state.metrics.inwardValue = normalizeMoney(
+            state.metrics.inwardValue + value,
+          );
+        } else {
+          state.metrics.outwardQty = normalizeMoney(
+            state.metrics.outwardQty + qty,
+          );
+          state.metrics.outwardValue = normalizeMoney(
+            state.metrics.outwardValue + value,
+          );
+        }
       } else {
-        state.metrics.salesQty = normalizeMoney(state.metrics.salesQty + qty);
-        state.metrics.salesValue = normalizeMoney(
-          state.metrics.salesValue + value,
-        );
+        return;
       }
 
       state.invoiceIds.add(String(voucher._id));
-      state.metrics.invoiceCount = state.invoiceIds.size;
-      state.metrics.lastVoucherOn =
-        !state.metrics.lastVoucherOn ||
-        new Date(voucher.date) > new Date(state.metrics.lastVoucherOn)
-          ? voucher.date
-          : state.metrics.lastVoucherOn;
-      state.metrics.averagePurchaseRate =
-        state.metrics.purchaseQty !== 0
-          ? normalizeMoney(
-              state.metrics.purchaseValue / state.metrics.purchaseQty,
-            )
-          : 0;
-      state.metrics.averageSaleRate =
-        state.metrics.salesQty !== 0
-          ? normalizeMoney(state.metrics.salesValue / state.metrics.salesQty)
-          : 0;
 
-      state.voucherRows.push({
-        id: `${voucher._id}-${index}`,
-        voucherId: String(voucher._id),
-        date: voucher.date || null,
-        dateLabel: formatDateLabel(voucher.date),
-        voucherName: voucher.voucherName || "Voucher",
-        number:
-          voucher.number ||
-          voucher.invoiceNumber ||
-          voucher.voucherNumber ||
-          "",
-        groupName: groupById.get(partyGroupId)?.name || "Unassigned Group",
-        ledgerName: partyLedger.name || "Unassigned Ledger",
-        itemName:
-          normalizeName(line.itemName || item.name || "") || "Unnamed Item",
-        direction: direction > 0 ? "Purchase" : "Sale",
-        qty,
-        rate,
-        value,
-      });
+      if (inPeriod) {
+        state.voucherRows.push({
+          id: `${voucher._id}-${index}`,
+          voucherId: String(voucher._id),
+          date: voucher.date || null,
+          dateLabel: formatDateLabel(voucher.date),
+          voucherName: voucher.voucherName || "Voucher",
+          number:
+            voucher.number ||
+            voucher.invoiceNumber ||
+            voucher.voucherNumber ||
+            "",
+          groupName: groupById.get(partyGroupId)?.name || "Unassigned Group",
+          ledgerName: partyLedger.name || "Unassigned Ledger",
+          itemName:
+            normalizeName(line.itemName || item.name || "") || "Unnamed Item",
+          direction: direction > 0 ? "Purchase" : "Sale",
+          qty,
+          rate,
+          value,
+        });
+      }
     });
 
     ledgerStateMap.set(partyLedgerId, state);
@@ -2635,9 +2713,9 @@ async function buildPartyMovementDetailReport(
     const targetState = requestedLedgerId
       ? ledgerStateMap.get(requestedLedgerId)
       : [...ledgerStateMap.values()].find(
-          (row) =>
-            normalizeName(row.name || "").toLowerCase() === requestedLedgerName,
-        );
+      (row) =>
+        normalizeName(row.name || "").toLowerCase() === requestedLedgerName,
+    );
 
     const rows = (targetState?.voucherRows || [])
       .slice()
@@ -2682,66 +2760,43 @@ async function buildPartyMovementDetailReport(
       .sort((left, right) => left.name.localeCompare(right.name));
 
     childGroups.forEach((group) => {
-      const rawMetrics = [...ledgerStateMap.values()].reduce(
-        (sum, ledgerState) => {
-          if (isDescendantGroup(ledgerState.groupId, group._id)) {
-            sum.purchaseQty = normalizeMoney(
-              sum.purchaseQty + Number(ledgerState.metrics.purchaseQty || 0),
-            );
-            sum.purchaseValue = normalizeMoney(
-              sum.purchaseValue +
-                Number(ledgerState.metrics.purchaseValue || 0),
-            );
-            sum.salesQty = normalizeMoney(
-              sum.salesQty + Number(ledgerState.metrics.salesQty || 0),
-            );
-            sum.salesValue = normalizeMoney(
-              sum.salesValue + Number(ledgerState.metrics.salesValue || 0),
-            );
-            sum.invoiceCount += Number(ledgerState.metrics.invoiceCount || 0);
-            sum.lastVoucherOn =
-              !sum.lastVoucherOn ||
-              (ledgerState.metrics.lastVoucherOn &&
-                new Date(ledgerState.metrics.lastVoucherOn) >
-                  new Date(sum.lastVoucherOn))
-                ? ledgerState.metrics.lastVoucherOn
-                : sum.lastVoucherOn;
-          }
-          return sum;
-        },
-        {
-          purchaseQty: 0,
-          purchaseValue: 0,
-          salesQty: 0,
-          salesValue: 0,
-          invoiceCount: 0,
-          averagePurchaseRate: 0,
-          averageSaleRate: 0,
-          lastVoucherOn: null,
-        },
-      );
+      const rawMetrics = [...ledgerStateMap.values()].reduce((sum, ledgerState) => {
+        if (isDescendantGroup(ledgerState.groupId, group._id)) {
+          addMovementTotals(sum, ledgerState.metrics);
+        }
+        return sum;
+      }, emptyMovementAccumulator());
 
-      rawMetrics.averagePurchaseRate =
-        rawMetrics.purchaseQty !== 0
-          ? normalizeMoney(rawMetrics.purchaseValue / rawMetrics.purchaseQty)
-          : 0;
-      rawMetrics.averageSaleRate =
-        rawMetrics.salesQty !== 0
-          ? normalizeMoney(rawMetrics.salesValue / rawMetrics.salesQty)
-          : 0;
+      const metrics = buildMovementMetrics({
+        ...rawMetrics,
+        closingQty: normalizeMoney(
+          Number(rawMetrics.openingQty || 0) +
+            Number(rawMetrics.inwardQty || 0) -
+            Number(rawMetrics.outwardQty || 0),
+        ),
+        closingValue: normalizeMoney(
+          Number(rawMetrics.openingValue || 0) +
+            Number(rawMetrics.inwardValue || 0) -
+            Number(rawMetrics.outwardValue || 0),
+        ),
+      });
 
       if (
-        rawMetrics.purchaseQty !== 0 ||
-        rawMetrics.salesQty !== 0 ||
-        rawMetrics.purchaseValue !== 0 ||
-        rawMetrics.salesValue !== 0
+        metrics.openingQty !== 0 ||
+        metrics.openingValue !== 0 ||
+        metrics.inwardQty !== 0 ||
+        metrics.inwardValue !== 0 ||
+        metrics.outwardQty !== 0 ||
+        metrics.outwardValue !== 0 ||
+        metrics.closingQty !== 0 ||
+        metrics.closingValue !== 0
       ) {
         rows.push({
           id: String(group._id),
           name: group.name,
           rowType: "group",
           secondaryLabel: getGroupPath(group.parentId),
-          metrics: rawMetrics,
+          metrics,
         });
       }
     });
@@ -2754,67 +2809,97 @@ async function buildPartyMovementDetailReport(
       )
       .sort((left, right) => left.name.localeCompare(right.name))
       .forEach((ledgerState) => {
+        const metrics = buildMovementMetrics({
+          ...ledgerState.metrics,
+          closingQty: normalizeMoney(
+            Number(ledgerState.metrics.openingQty || 0) +
+              Number(ledgerState.metrics.inwardQty || 0) -
+              Number(ledgerState.metrics.outwardQty || 0),
+          ),
+          closingValue: normalizeMoney(
+            Number(ledgerState.metrics.openingValue || 0) +
+              Number(ledgerState.metrics.inwardValue || 0) -
+              Number(ledgerState.metrics.outwardValue || 0),
+          ),
+        });
         rows.push({
           id: ledgerState.id,
           name: ledgerState.name,
           rowType: "ledger",
           secondaryLabel: getGroupPath(ledgerState.groupId),
-          metrics: ledgerState.metrics,
+          metrics,
         });
       });
 
-    const totals = rows.reduce(
-      (sum, row) => {
-        sum.purchaseQty = normalizeMoney(
-          sum.purchaseQty + Number(row.metrics.purchaseQty || 0),
-        );
-        sum.purchaseValue = normalizeMoney(
-          sum.purchaseValue + Number(row.metrics.purchaseValue || 0),
-        );
-        sum.salesQty = normalizeMoney(
-          sum.salesQty + Number(row.metrics.salesQty || 0),
-        );
-        sum.salesValue = normalizeMoney(
-          sum.salesValue + Number(row.metrics.salesValue || 0),
-        );
-        return sum;
-      },
-      { purchaseQty: 0, purchaseValue: 0, salesQty: 0, salesValue: 0 },
-    );
+    const totals = rows.reduce((sum, row) => {
+      addMovementTotals(sum, row.metrics);
+      return sum;
+    }, emptyMovementAccumulator());
 
-    return { rows, totals };
+    return {
+      rows,
+      totals: buildMovementMetrics({
+        ...totals,
+        closingQty: normalizeMoney(
+          Number(totals.openingQty || 0) +
+            Number(totals.inwardQty || 0) -
+            Number(totals.outwardQty || 0),
+        ),
+        closingValue: normalizeMoney(
+          Number(totals.openingValue || 0) +
+            Number(totals.inwardValue || 0) -
+            Number(totals.outwardValue || 0),
+        ),
+      }),
+    };
   }
 
   const rows = [...ledgerStateMap.values()]
-    .map((row) => ({
-      id: row.id,
-      name: row.name,
-      rowType: "ledger",
-      secondaryLabel: row.groupPath,
-      metrics: row.metrics,
-    }))
+    .map((row) => {
+      const metrics = buildMovementMetrics({
+        ...row.metrics,
+        closingQty: normalizeMoney(
+          Number(row.metrics.openingQty || 0) +
+            Number(row.metrics.inwardQty || 0) -
+            Number(row.metrics.outwardQty || 0),
+        ),
+        closingValue: normalizeMoney(
+          Number(row.metrics.openingValue || 0) +
+            Number(row.metrics.inwardValue || 0) -
+            Number(row.metrics.outwardValue || 0),
+        ),
+      });
+      return {
+        id: row.id,
+        name: row.name,
+        rowType: "ledger",
+        secondaryLabel: row.groupPath,
+        metrics,
+      };
+    })
     .sort((left, right) => left.name.localeCompare(right.name));
 
-  const totals = rows.reduce(
-    (sum, row) => {
-      sum.purchaseQty = normalizeMoney(
-        sum.purchaseQty + Number(row.metrics.purchaseQty || 0),
-      );
-      sum.purchaseValue = normalizeMoney(
-        sum.purchaseValue + Number(row.metrics.purchaseValue || 0),
-      );
-      sum.salesQty = normalizeMoney(
-        sum.salesQty + Number(row.metrics.salesQty || 0),
-      );
-      sum.salesValue = normalizeMoney(
-        sum.salesValue + Number(row.metrics.salesValue || 0),
-      );
-      return sum;
-    },
-    { purchaseQty: 0, purchaseValue: 0, salesQty: 0, salesValue: 0 },
-  );
+  const totals = rows.reduce((sum, row) => {
+    addMovementTotals(sum, row.metrics);
+    return sum;
+  }, emptyMovementAccumulator());
 
-  return { rows, totals };
+  return {
+    rows,
+    totals: buildMovementMetrics({
+      ...totals,
+      closingQty: normalizeMoney(
+        Number(totals.openingQty || 0) +
+          Number(totals.inwardQty || 0) -
+          Number(totals.outwardQty || 0),
+      ),
+      closingValue: normalizeMoney(
+        Number(totals.openingValue || 0) +
+          Number(totals.inwardValue || 0) -
+          Number(totals.outwardValue || 0),
+      ),
+    }),
+  };
 }
 
 async function buildStockGroupSummary(
@@ -3743,6 +3828,9 @@ app.post("/companies", async (req, res) => {
       enableBillWiseDetails,
       enableCostCentres,
       enableMultiCurrency,
+      requireCompanyLogin,
+      masterUsername,
+      masterPassword,
     } = req.body;
     if (!name) {
       return res.status(400).json({ message: "Company name is required" });
@@ -3755,6 +3843,20 @@ app.post("/companies", async (req, res) => {
       return res
         .status(400)
         .json({ message: "A company with this name already exists" });
+    }
+
+    const normalizedMasterUsername = normalizeName(masterUsername);
+    if (requireCompanyLogin) {
+      if (!normalizedMasterUsername) {
+        return res
+          .status(400)
+          .json({ message: "Master username is required when company login is enabled" });
+      }
+      if (!String(masterPassword || "").trim()) {
+        return res
+          .status(400)
+          .json({ message: "Master password is required when company login is enabled" });
+      }
     }
 
     const now = new Date();
@@ -3789,6 +3891,16 @@ app.post("/companies", async (req, res) => {
         enableCostCentres: Boolean(enableCostCentres),
         enableMultiCurrency: Boolean(enableMultiCurrency),
       },
+      auth: requireCompanyLogin
+        ? {
+            enabled: true,
+            masterUsername: normalizedMasterUsername,
+            ...hashCompanyPassword(masterPassword),
+            updatedAt: now,
+          }
+        : {
+            enabled: false,
+          },
       createdAt: now,
     });
 
@@ -3801,7 +3913,7 @@ app.post("/companies", async (req, res) => {
 
     res.status(201).json({
       message: "Company created with default masters",
-      company,
+      company: sanitizeCompany(company),
     });
   } catch (err) {
     console.error("Error creating company:", err);
@@ -3812,7 +3924,7 @@ app.post("/companies", async (req, res) => {
 // List companies
 app.get("/companies", async (req, res) => {
   const list = await Companies.find().sort({ name: 1 }).toArray();
-  res.json(list);
+  res.json(list.map(sanitizeCompany));
 });
 
 app.get("/companies/:companyId/masters/overview", async (req, res) => {
@@ -3835,7 +3947,7 @@ app.get("/companies/:companyId/masters/overview", async (req, res) => {
     }
 
     res.json({
-      company,
+      company: sanitizeCompany(company),
       groups,
       ledgers,
       items,
@@ -3903,13 +4015,76 @@ app.put("/companies/:companyId", async (req, res) => {
       },
     };
 
+    const requireCompanyLogin = Boolean(req.body.requireCompanyLogin);
+    const normalizedMasterUsername = normalizeName(req.body.masterUsername);
+    const masterPassword = String(req.body.masterPassword || "").trim();
+
+    if (requireCompanyLogin) {
+      const existingCompany = await Companies.findOne({ _id: companyId });
+      if (!normalizedMasterUsername) {
+        return res
+          .status(400)
+          .json({ message: "Master username is required when company login is enabled" });
+      }
+      if (!masterPassword && !existingCompany?.auth?.enabled) {
+        return res
+          .status(400)
+          .json({ message: "Master password is required when company login is enabled" });
+      }
+
+      update.$set.auth = {
+        ...(existingCompany?.auth || {}),
+        enabled: true,
+        masterUsername: normalizedMasterUsername,
+        updatedAt: new Date(),
+      };
+      if (masterPassword) {
+        Object.assign(update.$set.auth, hashCompanyPassword(masterPassword));
+      }
+    } else {
+      update.$set.auth = { enabled: false };
+    }
+
     await Companies.updateOne({ _id: companyId }, update);
     const company = await Companies.findOne({ _id: companyId });
     await ensureCompanyBaseCurrency(company);
-    res.json(company);
+    res.json(sanitizeCompany(company));
   } catch (err) {
     console.error("Error updating company:", err);
     res.status(500).json({ message: "Error updating company" });
+  }
+});
+
+app.post("/companies/:companyId/authenticate", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const company = await Companies.findOne({ _id: companyId });
+    if (!company) {
+      return res.status(404).json({ message: "Company not found" });
+    }
+
+    const auth = company.auth || {};
+    if (!auth.enabled) {
+      return res.json({ ok: true, company: sanitizeCompany(company) });
+    }
+
+    const username = normalizeName(req.body.masterUsername);
+    const password = String(req.body.masterPassword || "");
+    if (!username || !password) {
+      return res.status(400).json({ message: "Master username and password are required" });
+    }
+
+    if (username !== normalizeName(auth.masterUsername)) {
+      return res.status(401).json({ message: "Invalid master username or password" });
+    }
+    if (!verifyCompanyPassword(password, auth)) {
+      return res.status(401).json({ message: "Invalid master username or password" });
+    }
+
+    return res.json({ ok: true, company: sanitizeCompany(company) });
+  } catch (err) {
+    console.error("Error authenticating company:", err);
+    res.status(500).json({ message: "Error authenticating company" });
   }
 });
 
@@ -7455,6 +7630,8 @@ app.get(
           groupId: req.query.groupId || "",
           category: req.query.category || "",
           itemId: req.query.itemId || "",
+          partyGroupId: req.query.partyGroupId || "",
+          partyLedgerId: req.query.partyLedgerId || "",
         },
       );
       res.json(summary);
