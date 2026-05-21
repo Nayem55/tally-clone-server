@@ -24,6 +24,7 @@ let Companies,
   Ledgers,
   VoucherTypes,
   Vouchers,
+  AuditLogs,
   Boms,
   Customers,
   Employees,
@@ -102,6 +103,81 @@ function sanitizeCompany(company) {
     requiresCompanyLogin: Boolean(auth.enabled && auth.masterUsername),
     masterUsername: auth.enabled ? auth.masterUsername || "" : "",
   };
+}
+
+function getRequestActor(req) {
+  try {
+    const raw = req.headers["x-user-context"];
+    if (!raw) return null;
+    const user = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!user || typeof user !== "object") return null;
+    return {
+      id: user._id || user.id || user.userId || null,
+      name:
+        user.name ||
+        user.fullName ||
+        user.username ||
+        user.number ||
+        user.mobile ||
+        "Unknown User",
+      role: user.role || "",
+      number: user.number || "",
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+function buildAuditStamp(actor) {
+  const now = new Date();
+  if (!actor) {
+    return {
+      at: now,
+      by: null,
+    };
+  }
+  return {
+    at: now,
+    by: {
+      id: actor.id || null,
+      name: actor.name || "Unknown User",
+      role: actor.role || "",
+      number: actor.number || "",
+    },
+  };
+}
+
+function activeVoucherFilter(filter = {}) {
+  return {
+    ...filter,
+    isDeleted: { $ne: true },
+  };
+}
+
+async function logAuditEvent({
+  companyId,
+  entityType,
+  entityId,
+  action,
+  actor,
+  before = null,
+  after = null,
+}) {
+  if (!AuditLogs) return;
+  try {
+    await AuditLogs.insertOne({
+      companyId,
+      entityType,
+      entityId,
+      action,
+      actor: buildAuditStamp(actor).by,
+      before,
+      after,
+      at: new Date(),
+    });
+  } catch (error) {
+    console.error("Error writing audit log:", error);
+  }
 }
 
 function splitBalance(amount) {
@@ -440,6 +516,7 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
   const bankDetails = payload.bankDetails || {};
   const statutoryDetails = payload.statutoryDetails || {};
   const additionalInformation = payload.additionalInformation || {};
+  const accessControl = payload.accessControl || {};
 
   const payHeads = (salaryDetails.payHeads || []).map((head, index) => ({
     id: normalizeTextBlock(head.id) || `head-${index + 1}`,
@@ -654,8 +731,45 @@ function normalizeEmployeePayload(payload = {}, { employeeNumber = "" } = {}) {
         ),
       },
     },
+    accessControl: {
+      loginEnabled: toBoolean(accessControl.loginEnabled),
+      username: normalizeTextBlock(accessControl.username),
+      role: normalizeTextBlock(accessControl.role),
+      status: normalizeTextBlock(accessControl.status) || "Active",
+    },
     summary: summarizeSalaryHeads(payHeads),
     updatedAt: new Date(),
+  };
+}
+
+function sanitizeEmployee(row = null) {
+  if (!row) return null;
+  const { auth, ...rest } = row;
+  return {
+    ...rest,
+    accessControl: {
+      ...(rest.accessControl || {}),
+      hasPassword: Boolean(auth?.hash),
+      password: "",
+      confirmPassword: "",
+    },
+  };
+}
+
+function buildEmployeeSessionUser(employee = null, company = null) {
+  if (!employee) return null;
+  return {
+    _id: String(employee._id || ""),
+    employeeId: String(employee._id || ""),
+    companyId: String(employee.companyId || company?._id || ""),
+    companyName: company?.name || "",
+    name: employee.name || "",
+    username: employee.accessControl?.username || "",
+    role: employee.accessControl?.role || "Viewer",
+    designation: employee.personalDetails?.designation || "",
+    employeeNumber: employee.employeeNumber || "",
+    loginType: "employee",
+    attendance_id: String(employee._id || ""),
   };
 }
 
@@ -3570,6 +3684,7 @@ async function connectDb() {
   Ledgers = db.collection("ledgers");
   VoucherTypes = db.collection("voucherTypes");
   Vouchers = db.collection("vouchers");
+  AuditLogs = db.collection("auditLogs");
   Boms = db.collection("boms");
   Customers = db.collection("customers");
   Employees = db.collection("employees");
@@ -3581,6 +3696,29 @@ async function connectDb() {
   StockCategories = db.collection("stockCategories");
   Units = db.collection("units");
   Godowns = db.collection("godowns");
+
+  await Promise.all([
+    Companies.createIndex({ name: 1 }, { sparse: true }),
+    Groups.createIndex({ companyId: 1, parentId: 1, name: 1 }),
+    Ledgers.createIndex({ companyId: 1, groupId: 1, name: 1 }),
+    VoucherTypes.createIndex({ companyId: 1, category: 1, name: 1 }),
+    Vouchers.createIndex({ companyId: 1, date: -1 }),
+    Vouchers.createIndex({ companyId: 1, voucherTypeId: 1, date: -1 }),
+    Vouchers.createIndex({ companyId: 1, isDeleted: 1, date: -1 }),
+    Vouchers.createIndex({ "lines.ledgerId": 1, companyId: 1 }),
+    AuditLogs.createIndex({ companyId: 1, entityType: 1, entityId: 1, at: -1 }),
+    Boms.createIndex({ companyId: 1, updatedAt: -1 }),
+    Customers.createIndex({ companyId: 1, phone: 1 }),
+    Employees.createIndex({ companyId: 1, name: 1 }),
+    Items.createIndex({ companyId: 1, groupId: 1, name: 1 }),
+    pricelevels.createIndex({ companyId: 1, name: 1 }),
+    Currencies.createIndex({ companyId: 1, name: 1 }),
+    CostCategories.createIndex({ companyId: 1, name: 1 }),
+    CostCentres.createIndex({ companyId: 1, name: 1 }),
+    StockCategories.createIndex({ companyId: 1, name: 1 }),
+    Units.createIndex({ companyId: 1, name: 1 }),
+    Godowns.createIndex({ companyId: 1, name: 1 }),
+  ]);
   console.log("Connected to MongoDB");
 }
 
@@ -4168,6 +4306,49 @@ app.post("/companies/:companyId/authenticate", async (req, res) => {
   } catch (err) {
     console.error("Error authenticating company:", err);
     res.status(500).json({ message: "Error authenticating company" });
+  }
+});
+
+app.post("/companies/:companyId/employee-authenticate", async (req, res) => {
+  try {
+    const companyId = new ObjectId(req.params.companyId);
+    const company = await Companies.findOne({ _id: companyId });
+    if (!company) {
+      return res.status(404).json({ message: "Company not found" });
+    }
+
+    const username = normalizeTextBlock(req.body.username).toLowerCase();
+    const password = String(req.body.password || "");
+    if (!username || !password) {
+      return res.status(400).json({ message: "Username and password are required" });
+    }
+
+    const employee = await Employees.findOne({
+      companyId,
+      "accessControl.loginEnabled": true,
+      "accessControl.username": { $regex: `^${escapeRegex(username)}$`, $options: "i" },
+    });
+
+    if (!employee) {
+      return res.status(401).json({ message: "Invalid username or password" });
+    }
+
+    if (normalizeName(employee.accessControl?.status) === "inactive") {
+      return res.status(403).json({ message: "This employee login is inactive" });
+    }
+
+    if (!verifyCompanyPassword(password, employee.auth || {})) {
+      return res.status(401).json({ message: "Invalid username or password" });
+    }
+
+    return res.json({
+      ok: true,
+      company: sanitizeCompany(company),
+      user: buildEmployeeSessionUser(employee, company),
+    });
+  } catch (err) {
+    console.error("Error authenticating employee:", err);
+    res.status(500).json({ message: "Error authenticating employee" });
   }
 });
 
@@ -5398,7 +5579,7 @@ app.get("/companies/:companyId/vouchers", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
   const { type, from, to } = req.query;
 
-  const filter = { companyId };
+  const filter = activeVoucherFilter({ companyId });
 
   if (type) {
     filter.voucherTypeId = new ObjectId(type);
@@ -5430,7 +5611,9 @@ app.get("/companies/:companyId/vouchers/:voucherId", async (req, res, next) => {
     }
     const companyId = new ObjectId(req.params.companyId);
     const voucherId = new ObjectId(req.params.voucherId);
-    const voucher = await Vouchers.findOne({ _id: voucherId, companyId });
+    const voucher = await Vouchers.findOne(
+      activeVoucherFilter({ _id: voucherId, companyId }),
+    );
     if (!voucher) {
       return res.status(404).json({ message: "Voucher not found" });
     }
@@ -5446,6 +5629,7 @@ app.get("/companies/:companyId/vouchers/:voucherId", async (req, res, next) => {
 app.post("/companies/:companyId/vouchers", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
+    const actor = getRequestActor(req);
 
     const {
       voucherTypeId,
@@ -5499,6 +5683,21 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       };
     });
 
+    if (normalizedLines.length > 0) {
+      const ledgerIds = normalizedLines.map((line) => line.ledgerId);
+      const ownedLedgers = await Ledgers.find({
+        companyId,
+        _id: { $in: ledgerIds },
+      })
+        .project({ _id: 1 })
+        .toArray();
+      if (ownedLedgers.length !== ledgerIds.length) {
+        return res.status(400).json({
+          message: "One or more selected ledgers do not belong to this company",
+        });
+      }
+    }
+
     if (
       voucherType.category !== "INVENTORY" &&
       totalDr.toFixed(2) !== totalCr.toFixed(2)
@@ -5508,6 +5707,7 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       });
     }
 
+    const createdStamp = buildAuditStamp(actor);
     const doc = {
       companyId,
       voucherName: normalizeName(voucherName || voucherType.name),
@@ -5517,7 +5717,11 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
       narration: narration || "",
       lines: voucherType.category === "INVENTORY" ? [] : normalizedLines,
       inventoryLines: normalizedInventory,
-      createdAt: new Date(),
+      createdAt: createdStamp.at,
+      updatedAt: createdStamp.at,
+      createdBy: createdStamp.by,
+      updatedBy: createdStamp.by,
+      isDeleted: false,
     };
 
     if (commercialMeta) {
@@ -5546,6 +5750,14 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
     }
 
     const result = await Vouchers.insertOne(doc);
+    await logAuditEvent({
+      companyId,
+      entityType: "voucher",
+      entityId: result.insertedId,
+      action: "create",
+      actor,
+      after: { ...doc, _id: result.insertedId },
+    });
     res.status(201).json({ _id: result.insertedId, ...doc });
   } catch (err) {
     console.error("Error creating voucher:", err);
@@ -5558,10 +5770,13 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const voucherId = new ObjectId(req.params.voucherId);
-    const existingVoucher = await Vouchers.findOne({
-      _id: voucherId,
-      companyId,
-    });
+    const actor = getRequestActor(req);
+    const existingVoucher = await Vouchers.findOne(
+      activeVoucherFilter({
+        _id: voucherId,
+        companyId,
+      }),
+    );
     if (!existingVoucher) {
       return res.status(404).json({ message: "Voucher not found" });
     }
@@ -5663,6 +5878,21 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
           credit,
         };
       });
+      if (normalizedLines.length > 0) {
+        const ledgerIds = normalizedLines.map((line) => line.ledgerId);
+        const ownedLedgers = await Ledgers.find({
+          companyId,
+          _id: { $in: ledgerIds },
+        })
+          .project({ _id: 1 })
+          .toArray();
+        if (ownedLedgers.length !== ledgerIds.length) {
+          return res.status(400).json({
+            message:
+              "One or more selected ledgers do not belong to this company",
+          });
+        }
+      }
       if (
         voucherType?.category !== "INVENTORY" &&
         totalDr.toFixed(2) !== totalCr.toFixed(2)
@@ -5685,8 +5915,17 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
       delete update.$unset;
     }
 
-    await Vouchers.updateOne({ _id: voucherId, companyId }, update);
-    const updated = await Vouchers.findOne({ _id: voucherId, companyId });
+    const updatedStamp = buildAuditStamp(actor);
+    update.$set.updatedAt = updatedStamp.at;
+    update.$set.updatedBy = updatedStamp.by;
+
+    await Vouchers.updateOne(
+      activeVoucherFilter({ _id: voucherId, companyId }),
+      update,
+    );
+    const updated = await Vouchers.findOne(
+      activeVoucherFilter({ _id: voucherId, companyId }),
+    );
     if (
       nameKey(existingVoucher.voucherName || "") === "pos voucher" ||
       nameKey(updated?.voucherName || "") === "pos voucher"
@@ -5703,6 +5942,15 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
         await rebuildPosCustomerFromVouchers(companyId, nextPhone);
       }
     }
+    await logAuditEvent({
+      companyId,
+      entityType: "voucher",
+      entityId: voucherId,
+      action: "update",
+      actor,
+      before: existingVoucher,
+      after: updated,
+    });
     res.json(updated);
   } catch (err) {
     console.error("Error updating voucher:", err);
@@ -5715,8 +5963,41 @@ app.delete("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const voucherId = new ObjectId(req.params.voucherId);
+    const actor = getRequestActor(req);
+    const existingVoucher = await Vouchers.findOne(
+      activeVoucherFilter({ _id: voucherId, companyId }),
+    );
+    if (!existingVoucher) {
+      return res.status(404).json({ message: "Voucher not found" });
+    }
 
-    await Vouchers.deleteOne({ _id: voucherId, companyId });
+    const deletedStamp = buildAuditStamp(actor);
+    await Vouchers.updateOne(
+      activeVoucherFilter({ _id: voucherId, companyId }),
+      {
+        $set: {
+          isDeleted: true,
+          deletedAt: deletedStamp.at,
+          deletedBy: deletedStamp.by,
+          updatedAt: deletedStamp.at,
+          updatedBy: deletedStamp.by,
+        },
+      },
+    );
+    await logAuditEvent({
+      companyId,
+      entityType: "voucher",
+      entityId: voucherId,
+      action: "delete",
+      actor,
+      before: existingVoucher,
+      after: {
+        ...existingVoucher,
+        isDeleted: true,
+        deletedAt: deletedStamp.at,
+        deletedBy: deletedStamp.by,
+      },
+    });
     res.json({ message: "Voucher deleted" });
   } catch (err) {
     console.error("Error deleting voucher:", err);
@@ -9420,7 +9701,7 @@ app.get("/companies/:companyId/employees", async (req, res) => {
     const rows = await Employees.find(query)
       .sort({ createdAt: -1, name: 1 })
       .toArray();
-    res.json(rows);
+    res.json(rows.map((row) => sanitizeEmployee(row)));
   } catch (err) {
     res.status(500).json({ message: "Unable to load employees" });
   }
@@ -9434,7 +9715,7 @@ app.get("/companies/:companyId/employees/:id", async (req, res) => {
       companyId,
     });
     if (!row) return res.status(404).json({ message: "Employee not found" });
-    res.json(row);
+    res.json(sanitizeEmployee(row));
   } catch (err) {
     res.status(500).json({ message: "Unable to load employee" });
   }
@@ -9447,6 +9728,19 @@ app.post("/companies/:companyId/employees", async (req, res) => {
     const doc = normalizeEmployeePayload(req.body, {
       employeeNumber: generatedNumber,
     });
+    const loginEnabled = Boolean(doc.accessControl?.loginEnabled);
+    const username = normalizeTextBlock(doc.accessControl?.username).toLowerCase();
+    const password = normalizeTextBlock(req.body?.accessControl?.password);
+
+    if (loginEnabled && !username) {
+      return res.status(400).json({ message: "Login username is required when employee login is enabled" });
+    }
+    if (loginEnabled && !doc.accessControl?.role) {
+      return res.status(400).json({ message: "Access role is required when employee login is enabled" });
+    }
+    if (loginEnabled && !password) {
+      return res.status(400).json({ message: "Login password is required when employee login is enabled" });
+    }
 
     const duplicateConditions = [];
     if (doc.employeeNumber) {
@@ -9472,14 +9766,28 @@ app.post("/companies/:companyId/employees", async (req, res) => {
       });
     }
 
+    if (loginEnabled) {
+      const existingUsername = await Employees.findOne({
+        companyId,
+        "accessControl.username": { $regex: `^${escapeRegex(username)}$`, $options: "i" },
+      });
+      if (existingUsername) {
+        return res.status(400).json({ message: "Employee login username already exists in this company" });
+      }
+    }
+
     const finalDoc = {
       companyId,
       ...doc,
       createdAt: new Date(),
     };
+    finalDoc.accessControl.username = username;
+    if (loginEnabled) {
+      finalDoc.auth = hashCompanyPassword(password);
+    }
 
     const result = await Employees.insertOne(finalDoc);
-    res.status(201).json({ _id: result.insertedId, ...finalDoc });
+    res.status(201).json(sanitizeEmployee({ _id: result.insertedId, ...finalDoc }));
   } catch (err) {
     res
       .status(500)
@@ -9498,6 +9806,16 @@ app.put("/companies/:companyId/employees/:id", async (req, res) => {
     const doc = normalizeEmployeePayload(req.body, {
       employeeNumber: existing.employeeNumber,
     });
+    const loginEnabled = Boolean(doc.accessControl?.loginEnabled);
+    const username = normalizeTextBlock(doc.accessControl?.username).toLowerCase();
+    const password = normalizeTextBlock(req.body?.accessControl?.password);
+
+    if (loginEnabled && !username) {
+      return res.status(400).json({ message: "Login username is required when employee login is enabled" });
+    }
+    if (loginEnabled && !doc.accessControl?.role) {
+      return res.status(400).json({ message: "Access role is required when employee login is enabled" });
+    }
 
     const duplicateConditions = [];
     if (doc.employeeNumber) {
@@ -9524,9 +9842,28 @@ app.put("/companies/:companyId/employees/:id", async (req, res) => {
       });
     }
 
-    await Employees.updateOne({ _id: id, companyId }, { $set: doc });
+    if (loginEnabled) {
+      const existingUsername = await Employees.findOne({
+        companyId,
+        _id: { $ne: id },
+        "accessControl.username": { $regex: `^${escapeRegex(username)}$`, $options: "i" },
+      });
+      if (existingUsername) {
+        return res.status(400).json({ message: "Employee login username already exists in this company" });
+      }
+    }
 
-    res.json(await Employees.findOne({ _id: id, companyId }));
+    doc.accessControl.username = username;
+    const updatePayload = { ...doc };
+    if (loginEnabled) {
+      updatePayload.auth = password ? hashCompanyPassword(password) : existing.auth || null;
+    } else {
+      updatePayload.auth = null;
+    }
+
+    await Employees.updateOne({ _id: id, companyId }, { $set: updatePayload });
+
+    res.json(sanitizeEmployee(await Employees.findOne({ _id: id, companyId })));
   } catch (err) {
     res
       .status(500)
