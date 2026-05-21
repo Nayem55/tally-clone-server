@@ -9,14 +9,68 @@ require("dotenv").config();
 
 const app = express();
 
-app.use(express.json({ limit: "100mb" }));
-app.use(cors()); // Allow cross-origin requests
-
 const MONGO_URI =
   process.env.MONGO_URI || "mongodb://192.168.0.59:27017/Demo-pos";
 const PORT = Number(process.env.PORT) || 15001;
+const RATE_LIMIT_AUTH_WINDOW_MS = Number(process.env.RATE_LIMIT_AUTH_WINDOW_MS) || 5 * 60 * 1000;
+const RATE_LIMIT_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH_MAX) || 20;
+const RATE_LIMIT_WRITE_WINDOW_MS = Number(process.env.RATE_LIMIT_WRITE_WINDOW_MS) || 60 * 1000;
+const RATE_LIMIT_WRITE_MAX = Number(process.env.RATE_LIMIT_WRITE_MAX) || 120;
 
-app.use(express.json());
+function parseAllowedOrigins(value = "") {
+  return String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+const DEFAULT_ALLOWED_ORIGINS = [
+  "http://localhost:15000",
+  "http://127.0.0.1:15000",
+  "http://175.29.181.245:15000",
+  "https://175.29.181.245:15000",
+];
+
+const ALLOWED_ORIGINS = new Set([
+  ...DEFAULT_ALLOWED_ORIGINS,
+  ...parseAllowedOrigins(process.env.CORS_ALLOWED_ORIGINS),
+]);
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin || ALLOWED_ORIGINS.has(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error("Origin is not allowed by CORS"));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-user-context"],
+  credentials: false,
+  maxAge: 86400,
+};
+
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  next();
+});
+
+app.use(express.json({ limit: "100mb" }));
+app.use(cors(corsOptions));
+app.use(/^\/companies\/[^/]+/, (req, res, next) => {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
+    return next();
+  }
+
+  return rateLimit({
+    scope: "company-write",
+    windowMs: RATE_LIMIT_WRITE_WINDOW_MS,
+    max: RATE_LIMIT_WRITE_MAX,
+    message: "Too many write requests. Please slow down and try again shortly.",
+  })(req, res, next);
+});
 
 let db;
 let Companies,
@@ -36,6 +90,8 @@ let Companies,
   StockCategories,
   Units,
   Godowns;
+
+const requestBuckets = new Map();
 
 const STOCK_VOUCHER_FLOW = {
   purchase: 1,
@@ -68,6 +124,55 @@ function normalizeMoney(value) {
 
 function normalizePhone(value = "") {
   return String(value || "").replace(/\D/g, "");
+}
+
+function getRateLimitKey(req, scope = "default") {
+  const forwarded = String(req.headers["x-forwarded-for"] || "")
+    .split(",")[0]
+    .trim();
+  const ip = forwarded || req.ip || req.socket?.remoteAddress || "unknown";
+  return `${scope}:${ip}`;
+}
+
+function applyRateLimit({ key, windowMs, max }) {
+  const now = Date.now();
+  const current = requestBuckets.get(key);
+  if (!current || current.resetAt <= now) {
+    const nextBucket = { count: 1, resetAt: now + windowMs };
+    requestBuckets.set(key, nextBucket);
+    return { allowed: true, remaining: Math.max(max - 1, 0), resetAt: nextBucket.resetAt };
+  }
+
+  current.count += 1;
+  requestBuckets.set(key, current);
+  return {
+    allowed: current.count <= max,
+    remaining: Math.max(max - current.count, 0),
+    resetAt: current.resetAt,
+  };
+}
+
+function rateLimit({ scope, windowMs, max, message }) {
+  return (req, res, next) => {
+    const key = getRateLimitKey(req, scope);
+    const result = applyRateLimit({ key, windowMs, max });
+    res.setHeader("X-RateLimit-Limit", String(max));
+    res.setHeader("X-RateLimit-Remaining", String(result.remaining));
+    res.setHeader("X-RateLimit-Reset", String(Math.ceil(result.resetAt / 1000)));
+
+    if (!result.allowed) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((result.resetAt - Date.now()) / 1000),
+      );
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      return res.status(429).json({
+        message: message || "Too many requests. Please wait a bit and try again.",
+      });
+    }
+
+    return next();
+  };
 }
 
 function hashCompanyPassword(password = "") {
@@ -152,6 +257,10 @@ function activeVoucherFilter(filter = {}) {
     ...filter,
     isDeleted: { $ne: true },
   };
+}
+
+function activeVoucherMatch(filter = {}) {
+  return activeVoucherFilter(filter);
 }
 
 async function logAuditEvent({
@@ -773,6 +882,124 @@ function buildEmployeeSessionUser(employee = null, company = null) {
   };
 }
 
+function normalizeRole(role = "") {
+  return String(role || "").trim().toLowerCase();
+}
+
+const ROLE_GROUPS = {
+  companyAdmin: ["admin", "supervisor"],
+  accountingMasters: ["admin", "supervisor", "accountant"],
+  groupMasters: ["admin", "supervisor", "accountant", "store operator"],
+  inventoryMasters: ["admin", "supervisor", "store operator"],
+  priceManagement: ["admin", "supervisor", "accountant", "store operator"],
+  accountingVouchers: [
+    "admin",
+    "supervisor",
+    "accountant",
+    "cashier",
+    "sales operator",
+    "store operator",
+  ],
+  inventoryVouchers: ["admin", "supervisor", "store operator"],
+  payrollMasters: ["admin", "supervisor"],
+};
+
+async function resolveAuthorizedEmployee(companyId, req) {
+  const employeeCount = await Employees.countDocuments({ companyId });
+  if (employeeCount === 0) {
+    return { ok: true, bypass: true, employee: null };
+  }
+
+  const actor = getRequestActor(req);
+  if (!actor?.id) {
+    return {
+      ok: false,
+      status: 401,
+      message: "Employee login is required for this company.",
+    };
+  }
+
+  let employeeId = null;
+  try {
+    employeeId = new ObjectId(actor.id);
+  } catch (error) {
+    return {
+      ok: false,
+      status: 401,
+      message: "Employee session is invalid. Please sign in again.",
+    };
+  }
+
+  const employee = await Employees.findOne({ _id: employeeId, companyId });
+  if (!employee) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Employee session does not belong to this company.",
+    };
+  }
+
+  if (!employee.accessControl?.loginEnabled) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Employee login is not enabled for this account.",
+    };
+  }
+
+  if (normalizeName(employee.accessControl?.status) === "inactive") {
+    return {
+      ok: false,
+      status: 403,
+      message: "This employee login is inactive.",
+    };
+  }
+
+  return { ok: true, bypass: false, employee, actor };
+}
+
+function requireCompanyWriteAccess(allowedRoles = []) {
+  const normalizedAllowedRoles = allowedRoles.map(normalizeRole);
+
+  return async (req, res, next) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const authResult = await resolveAuthorizedEmployee(companyId, req);
+
+      if (!authResult.ok) {
+        return res
+          .status(authResult.status || 403)
+          .json({ message: authResult.message || "Access denied." });
+      }
+
+      if (authResult.bypass) {
+        req.employeeActor = null;
+        req.authActor = null;
+        return next();
+      }
+
+      const role = normalizeRole(authResult.employee?.accessControl?.role);
+      if (
+        normalizedAllowedRoles.length > 0 &&
+        !normalizedAllowedRoles.includes(role)
+      ) {
+        return res.status(403).json({
+          message: "Your employee role is not allowed to perform this action.",
+        });
+      }
+
+      req.employeeActor = authResult.employee;
+      req.authActor = authResult.actor || getRequestActor(req);
+      return next();
+    } catch (error) {
+      console.error("Error enforcing employee write access:", error);
+      return res.status(500).json({ message: "Unable to verify access rights." });
+    }
+  };
+}
+
+const requireCompanyReadAccess = requireCompanyWriteAccess;
+
 async function generateEmployeeNumber(companyId) {
   const rows = await Employees.find(
     { companyId },
@@ -1344,11 +1571,11 @@ async function buildStockSummary(
   const [groups, allItems, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
-    Vouchers.find({
+    Vouchers.find(activeVoucherFilter({
       companyId,
       ...(toDate ? { date: { $lte: toDate } } : {}),
       inventoryLines: { $exists: true, $ne: [] },
-    }).toArray(),
+    })).toArray(),
   ]);
 
   const items = allItems.filter((item) => itemMatchesRoleFilter(item, options));
@@ -1555,11 +1782,11 @@ async function buildInventoryDetailReport(
     Groups.find({ companyId }).toArray(),
     Ledgers.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
-    Vouchers.find({
+    Vouchers.find(activeVoucherFilter({
       companyId,
       ...(toDate ? { date: { $lte: toDate } } : {}),
       inventoryLines: { $exists: true, $ne: [] },
-    }).toArray(),
+    })).toArray(),
   ]);
 
   const requestedGroupId = options.groupId ? String(options.groupId) : "";
@@ -2061,7 +2288,7 @@ async function buildInventoryMovementDimensionReport(
     ? String(options.salesPersonId)
     : "";
   if (dimension === "sales-person") {
-    const vouchers = await Vouchers.find({
+    const vouchers = await Vouchers.find(activeVoucherFilter({
       companyId,
       ...(fromDate || toDate
         ? {
@@ -2071,7 +2298,7 @@ async function buildInventoryMovementDimensionReport(
             },
           }
         : {}),
-    })
+    }))
       .sort({ date: -1, createdAt: -1 })
       .toArray();
 
@@ -2270,11 +2497,11 @@ async function buildInventoryMovementDimensionReport(
   }
 
   const [vouchers, ledgers, items, groups] = await Promise.all([
-    Vouchers.find({
+    Vouchers.find(activeVoucherFilter({
       companyId,
       ...(toDate ? { date: { $lte: toDate } } : {}),
       inventoryLines: { $exists: true, $ne: [] },
-    }).toArray(),
+    })).toArray(),
     Ledgers.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
     Groups.find({ companyId }).toArray(),
@@ -2493,7 +2720,7 @@ async function buildSalesPersonDrillReport(
   const [groups, items, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
-    Vouchers.find({
+    Vouchers.find(activeVoucherFilter({
       companyId,
       ...(fromDate || toDate
         ? {
@@ -2503,7 +2730,7 @@ async function buildSalesPersonDrillReport(
             },
           }
         : {}),
-    })
+    }))
       .sort({ date: -1, createdAt: -1 })
       .toArray(),
   ]);
@@ -2738,7 +2965,7 @@ async function buildPartyMovementDetailReport(
   const requestedLedgerName = normalizeName(ledgerName || "").toLowerCase();
 
   const [vouchers, ledgers, items, groups] = await Promise.all([
-    Vouchers.find({
+    Vouchers.find(activeVoucherFilter({
       companyId,
       ...(fromDate || toDate
         ? {
@@ -2746,10 +2973,10 @@ async function buildPartyMovementDetailReport(
               ...(fromDate ? { $gte: fromDate } : {}),
               ...(toDate ? { $lte: toDate } : {}),
             },
-          }
+      }
         : {}),
       inventoryLines: { $exists: true, $ne: [] },
-    })
+    }))
       .sort({ date: -1, createdAt: -1 })
       .toArray(),
     Ledgers.find({ companyId }).toArray(),
@@ -3426,7 +3653,7 @@ async function buildProductionRegister(
   toDate = null,
 ) {
   const [vouchers, companies] = await Promise.all([
-    Vouchers.find({
+    Vouchers.find(activeVoucherFilter({
       companyId,
       ...(fromDate || toDate
         ? {
@@ -3437,7 +3664,7 @@ async function buildProductionRegister(
           }
         : {}),
       "manufacturingMeta.outputItemId": { $exists: true },
-    })
+    }))
       .sort({ date: -1, createdAt: -1 })
       .toArray(),
     Companies.findOne({ _id: companyId }),
@@ -3490,7 +3717,7 @@ async function buildComponentConsumptionReport(
   toDate = null,
 ) {
   const [vouchers, items] = await Promise.all([
-    Vouchers.find({
+    Vouchers.find(activeVoucherFilter({
       companyId,
       ...(fromDate || toDate
         ? {
@@ -3502,7 +3729,7 @@ async function buildComponentConsumptionReport(
         : {}),
       "manufacturingMeta.outputItemId": { $exists: true },
       inventoryLines: { $exists: true, $ne: [] },
-    }).toArray(),
+    })).toArray(),
     Items.find({ companyId }).toArray(),
   ]);
 
@@ -4181,7 +4408,7 @@ app.get("/companies/:companyId/masters/overview", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId", async (req, res) => {
+app.put("/companies/:companyId", requireCompanyWriteAccess(ROLE_GROUPS.companyAdmin), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const name = normalizeName(req.body.name);
@@ -4276,7 +4503,15 @@ app.put("/companies/:companyId", async (req, res) => {
   }
 });
 
-app.post("/companies/:companyId/authenticate", async (req, res) => {
+app.post(
+  "/companies/:companyId/authenticate",
+  rateLimit({
+    scope: "company-auth",
+    windowMs: RATE_LIMIT_AUTH_WINDOW_MS,
+    max: RATE_LIMIT_AUTH_MAX,
+    message: "Too many company login attempts. Please wait and try again.",
+  }),
+  async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const company = await Companies.findOne({ _id: companyId });
@@ -4309,7 +4544,15 @@ app.post("/companies/:companyId/authenticate", async (req, res) => {
   }
 });
 
-app.post("/companies/:companyId/employee-authenticate", async (req, res) => {
+app.post(
+  "/companies/:companyId/employee-authenticate",
+  rateLimit({
+    scope: "employee-auth",
+    windowMs: RATE_LIMIT_AUTH_WINDOW_MS,
+    max: RATE_LIMIT_AUTH_MAX,
+    message: "Too many employee login attempts. Please wait and try again.",
+  }),
+  async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const company = await Companies.findOne({ _id: companyId });
@@ -4352,6 +4595,86 @@ app.post("/companies/:companyId/employee-authenticate", async (req, res) => {
   }
 });
 
+app.get(
+  "/companies/:companyId/audit-logs",
+  requireCompanyReadAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const { from = "", to = "", action = "", entityType = "", actorId = "", search = "" } =
+        req.query || {};
+
+      const filter = { companyId };
+
+      if (action) {
+        filter.action = normalizeTextBlock(action);
+      }
+
+      if (entityType) {
+        filter.entityType = normalizeTextBlock(entityType);
+      }
+
+      if (actorId) {
+        filter["actor.id"] = normalizeTextBlock(actorId);
+      }
+
+      if (from || to) {
+        const range = {};
+        if (from) {
+          const fromDate = dayjs(from).startOf("day");
+          if (fromDate.isValid()) {
+            range.$gte = fromDate.toDate();
+          }
+        }
+        if (to) {
+          const toDate = dayjs(to).endOf("day");
+          if (toDate.isValid()) {
+            range.$lte = toDate.toDate();
+          }
+        }
+        if (Object.keys(range).length > 0) {
+          filter.at = range;
+        }
+      }
+
+      if (search) {
+        const safeSearch = escapeRegex(normalizeTextBlock(search));
+        filter.$or = [
+          { entityType: { $regex: safeSearch, $options: "i" } },
+          { action: { $regex: safeSearch, $options: "i" } },
+          { "actor.name": { $regex: safeSearch, $options: "i" } },
+          { "actor.role": { $regex: safeSearch, $options: "i" } },
+        ];
+      }
+
+      const rows = await AuditLogs.find(filter)
+        .sort({ at: -1 })
+        .limit(500)
+        .toArray();
+
+      const actorOptions = [];
+      const actorMap = new Map();
+      rows.forEach((row) => {
+        const id = normalizeTextBlock(row.actor?.id);
+        if (!id || actorMap.has(id)) return;
+        const label = row.actor?.name
+          ? `${row.actor.name}${row.actor?.role ? ` (${row.actor.role})` : ""}`
+          : id;
+        actorMap.set(id, { value: id, label });
+      });
+      actorOptions.push(...actorMap.values());
+
+      res.json({
+        rows,
+        actorOptions,
+      });
+    } catch (err) {
+      console.error("Error loading audit logs:", err);
+      res.status(500).json({ message: "Unable to load audit logs" });
+    }
+  },
+);
+
 // ---------- GROUPS (CRUD like Tally Masters) ----------
 
 // List groups for a company
@@ -4362,7 +4685,7 @@ app.get("/companies/:companyId/groups", async (req, res) => {
 });
 
 // Create group
-app.post("/companies/:companyId/groups", async (req, res) => {
+app.post("/companies/:companyId/groups", requireCompanyWriteAccess(ROLE_GROUPS.groupMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const name = normalizeName(req.body.name);
@@ -4410,7 +4733,7 @@ app.post("/companies/:companyId/groups", async (req, res) => {
 });
 
 // Alter group
-app.put("/companies/:companyId/groups/:groupId", async (req, res) => {
+app.put("/companies/:companyId/groups/:groupId", requireCompanyWriteAccess(ROLE_GROUPS.groupMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const groupId = new ObjectId(req.params.groupId);
@@ -4464,7 +4787,7 @@ app.put("/companies/:companyId/groups/:groupId", async (req, res) => {
 });
 
 // Delete group (basic guard: no ledgers using it)
-app.delete("/companies/:companyId/groups/:groupId", async (req, res) => {
+app.delete("/companies/:companyId/groups/:groupId", requireCompanyWriteAccess(ROLE_GROUPS.groupMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const groupId = new ObjectId(req.params.groupId);
@@ -4525,7 +4848,9 @@ app.get("/companies/:companyId/ledgers/with-balances", async (req, res) => {
     const toDate = safeDate(req.query.to);
     const [vouchers, ledgers] = await Promise.all([
       Vouchers.find(
-        toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+        activeVoucherFilter(
+          toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+        ),
       ).toArray(),
       Ledgers.aggregate([
         { $match: { companyId } },
@@ -4654,7 +4979,7 @@ app.get("/companies/:companyId/ledgers/by-group", async (req, res) => {
 });
 
 // Create ledger
-app.post("/companies/:companyId/ledgers", async (req, res) => {
+app.post("/companies/:companyId/ledgers", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const name = normalizeName(req.body.name);
@@ -4714,7 +5039,7 @@ app.post("/companies/:companyId/ledgers", async (req, res) => {
 });
 
 // Alter ledger
-app.put("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
+app.put("/companies/:companyId/ledgers/:ledgerId", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const ledgerId = new ObjectId(req.params.ledgerId);
@@ -4783,7 +5108,7 @@ app.put("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
 });
 
 // Delete ledger (guard: no vouchers using it)
-app.delete("/companies/:companyId/ledgers/:ledgerId", async (req, res) => {
+app.delete("/companies/:companyId/ledgers/:ledgerId", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const ledgerId = new ObjectId(req.params.ledgerId);
@@ -4826,7 +5151,7 @@ app.get("/companies/:companyId/voucher-types", async (req, res) => {
 });
 
 // Create voucher type
-app.post("/companies/:companyId/voucher-types", async (req, res) => {
+app.post("/companies/:companyId/voucher-types", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const { name, category = "ACCOUNTING" } = req.body;
@@ -4842,6 +5167,7 @@ app.post("/companies/:companyId/voucher-types", async (req, res) => {
 // Alter voucher type
 app.put(
   "/companies/:companyId/voucher-types/:voucherTypeId",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
@@ -4868,6 +5194,7 @@ app.put(
 // Delete voucher type (if not used)
 app.delete(
   "/companies/:companyId/voucher-types/:voucherTypeId",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
@@ -4982,7 +5309,7 @@ app.get(
   },
 );
 
-app.post("/companies/:companyId/pos-vouchers", async (req, res) => {
+app.post("/companies/:companyId/pos-vouchers", requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await ensureCompanyCoreMasters(companyId);
@@ -5626,7 +5953,7 @@ app.get("/companies/:companyId/vouchers/:voucherId", async (req, res, next) => {
 
 // Create voucher (like Tally: one header + many lines)
 // CREATE PURCHASE / SALES / INVENTORY VOUCHER
-app.post("/companies/:companyId/vouchers", async (req, res) => {
+app.post("/companies/:companyId/vouchers", requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const actor = getRequestActor(req);
@@ -5766,7 +6093,7 @@ app.post("/companies/:companyId/vouchers", async (req, res) => {
 });
 
 // Alter voucher
-app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
+app.put("/companies/:companyId/vouchers/:voucherId", requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const voucherId = new ObjectId(req.params.voucherId);
@@ -5959,7 +6286,7 @@ app.put("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
 });
 
 // Delete voucher
-app.delete("/companies/:companyId/vouchers/:voucherId", async (req, res) => {
+app.delete("/companies/:companyId/vouchers/:voucherId", requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const voucherId = new ObjectId(req.params.voucherId);
@@ -6241,7 +6568,7 @@ app.get("/companies/:companyId/reports/profit-loss-drilldown", async (req, res) 
 
     const [groups, vouchers, ledgers, stockSummary] = await Promise.all([
       Groups.find({ companyId }).toArray(),
-      Vouchers.find({ companyId }).toArray(),
+      Vouchers.find(activeVoucherFilter({ companyId })).toArray(),
       Ledgers.aggregate([
         { $match: { companyId } },
         {
@@ -6484,7 +6811,7 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
     // -----------------------------------------------------
     // 1️⃣ GET MOVEMENTS BEFORE FROM DATE = TRUE OPENING
     // -----------------------------------------------------
-    let openingFilter = { companyId };
+    let openingFilter = activeVoucherMatch({ companyId });
     if (fromDate) {
       openingFilter.date = { $lt: fromDate };
     }
@@ -6509,7 +6836,7 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
     // -----------------------------------------------------
     // 2️⃣ MOVEMENTS FOR SELECTED DATE RANGE (FROM <> TO)
     // -----------------------------------------------------
-    let periodFilter = { companyId };
+    let periodFilter = activeVoucherMatch({ companyId });
     if (fromDate || toDate) {
       periodFilter.date = {};
       if (fromDate) periodFilter.date.$gte = fromDate;
@@ -7018,7 +7345,7 @@ app.get("/companies/:companyId/items", async (req, res) => {
 
 // Create item (like Stock Item in Tally)
 // CREATE ITEM (Tally Style)
-app.post("/companies/:companyId/items", async (req, res) => {
+app.post("/companies/:companyId/items", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const {
@@ -7140,7 +7467,7 @@ app.post("/companies/:companyId/items", async (req, res) => {
 });
 
 // Update item
-app.put("/companies/:companyId/items/:itemId", async (req, res) => {
+app.put("/companies/:companyId/items/:itemId", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const itemId = new ObjectId(req.params.itemId);
@@ -7269,7 +7596,7 @@ app.put("/companies/:companyId/items/:itemId", async (req, res) => {
 });
 
 // Bulk update item prices by group (includes child groups)
-app.put("/companies/:companyId/update-prices-by-group", async (req, res) => {
+app.put("/companies/:companyId/update-prices-by-group", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
   try {
     const { companyId } = req.params;
     const { groupId, priceLevelId, rate, effectiveFrom } = req.body;
@@ -7382,7 +7709,7 @@ app.put("/companies/:companyId/update-prices-by-group", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId/update-price-by-item", async (req, res) => {
+app.put("/companies/:companyId/update-price-by-item", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
   try {
     const { companyId } = req.params;
     const { itemId, priceLevelId, rate, effectiveFrom } = req.body;
@@ -7462,7 +7789,7 @@ app.put("/companies/:companyId/update-price-by-item", async (req, res) => {
 });
 
 // Delete item (guard: not used in vouchers)
-app.delete("/companies/:companyId/items/:itemId", async (req, res) => {
+app.delete("/companies/:companyId/items/:itemId", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const itemId = new ObjectId(req.params.itemId);
@@ -7778,7 +8105,7 @@ app.get("/companies/:companyId/manufacturing/boms", async (req, res) => {
   }
 });
 
-app.post("/companies/:companyId/manufacturing/boms", async (req, res) => {
+app.post("/companies/:companyId/manufacturing/boms", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const {
@@ -7847,7 +8174,7 @@ app.post("/companies/:companyId/manufacturing/boms", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId/manufacturing/boms/:bomId", async (req, res) => {
+app.put("/companies/:companyId/manufacturing/boms/:bomId", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const bomId = new ObjectId(req.params.bomId);
@@ -7914,6 +8241,7 @@ app.put("/companies/:companyId/manufacturing/boms/:bomId", async (req, res) => {
 
 app.delete(
   "/companies/:companyId/manufacturing/boms/:bomId",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
@@ -8165,7 +8493,7 @@ app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
 
     const [groups, vouchers, ledgers, stockSummary] = await Promise.all([
       Groups.find({ companyId }).toArray(),
-      Vouchers.find({ companyId }).toArray(),
+      Vouchers.find(activeVoucherFilter({ companyId })).toArray(),
       Ledgers.aggregate([
         { $match: { companyId } },
         {
@@ -8222,7 +8550,9 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
     const [groups, vouchers, ledgers, stockSummary] = await Promise.all([
       Groups.find({ companyId }).toArray(),
       Vouchers.find(
-        toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+        activeVoucherFilter(
+          toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+        ),
       ).toArray(),
       Ledgers.aggregate([
         { $match: { companyId } },
@@ -8489,9 +8819,9 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
       Groups.countDocuments({ companyId }),
       Ledgers.countDocuments({ companyId }),
       Items.countDocuments({ companyId }),
-      Vouchers.countDocuments({ companyId }),
+      Vouchers.countDocuments(activeVoucherFilter({ companyId })),
       buildStockSummary(companyId),
-      Vouchers.find({ companyId }).toArray(),
+      Vouchers.find(activeVoucherFilter({ companyId })).toArray(),
       Ledgers.aggregate([
         { $match: { companyId } },
         {
@@ -8972,7 +9302,7 @@ app.get(
   },
 );
 
-app.post("/companies/:companyId/price-levels", async (req, res) => {
+app.post("/companies/:companyId/price-levels", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const { code, name } = req.body;
@@ -9008,7 +9338,7 @@ app.get("/companies/:companyId/price-levels", async (req, res) => {
     .toArray();
   res.json(list);
 });
-app.put("/companies/:companyId/price-levels/:id", async (req, res) => {
+app.put("/companies/:companyId/price-levels/:id", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
   try {
     const id = new ObjectId(req.params.id);
     const companyId = new ObjectId(req.params.companyId);
@@ -9026,7 +9356,7 @@ app.put("/companies/:companyId/price-levels/:id", async (req, res) => {
     res.status(500).json({ message: "Error updating price level" });
   }
 });
-app.delete("/companies/:companyId/price-levels/:id", async (req, res) => {
+app.delete("/companies/:companyId/price-levels/:id", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
   try {
     const id = new ObjectId(req.params.id);
     const companyId = new ObjectId(req.params.companyId);
@@ -9209,11 +9539,11 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
   const phone = normalizePhone(phoneInput);
   if (!phone) return null;
 
-  const vouchers = await Vouchers.find({
+  const vouchers = await Vouchers.find(activeVoucherFilter({
     companyId,
     voucherName: { $regex: "^POS Voucher$", $options: "i" },
     "customerSnapshot.phone": phone,
-  })
+  }))
     .sort({ date: 1, createdAt: 1 })
     .toArray();
 
@@ -9288,7 +9618,7 @@ app.get("/companies/:companyId/cost-categories", async (req, res) => {
   res.json(await listNamedMasters(CostCategories, companyId, { createdAt: 1 }));
 });
 
-app.post("/companies/:companyId/cost-categories", async (req, res) => {
+app.post("/companies/:companyId/cost-categories", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const row = await createNamedMaster(CostCategories, companyId, req.body, {
@@ -9304,7 +9634,7 @@ app.post("/companies/:companyId/cost-categories", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId/cost-categories/:id", async (req, res) => {
+app.put("/companies/:companyId/cost-categories/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await updateNamedMaster(
@@ -9331,7 +9661,7 @@ app.put("/companies/:companyId/cost-categories/:id", async (req, res) => {
   }
 });
 
-app.delete("/companies/:companyId/cost-categories/:id", async (req, res) => {
+app.delete("/companies/:companyId/cost-categories/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await deleteNamedMaster(CostCategories, companyId, req.params.id);
@@ -9346,7 +9676,7 @@ app.get("/companies/:companyId/cost-centres", async (req, res) => {
   res.json(await listNamedMasters(CostCentres, companyId, { createdAt: 1 }));
 });
 
-app.post("/companies/:companyId/cost-centres", async (req, res) => {
+app.post("/companies/:companyId/cost-centres", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const row = await createNamedMaster(CostCentres, companyId, req.body, {
@@ -9362,7 +9692,7 @@ app.post("/companies/:companyId/cost-centres", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId/cost-centres/:id", async (req, res) => {
+app.put("/companies/:companyId/cost-centres/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await updateNamedMaster(CostCentres, companyId, req.params.id, req.body, {
@@ -9383,7 +9713,7 @@ app.put("/companies/:companyId/cost-centres/:id", async (req, res) => {
   }
 });
 
-app.delete("/companies/:companyId/cost-centres/:id", async (req, res) => {
+app.delete("/companies/:companyId/cost-centres/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await deleteNamedMaster(CostCentres, companyId, req.params.id);
@@ -9398,7 +9728,7 @@ app.get("/companies/:companyId/units", async (req, res) => {
   res.json(await listNamedMasters(Units, companyId, { createdAt: 1 }));
 });
 
-app.post("/companies/:companyId/units", async (req, res) => {
+app.post("/companies/:companyId/units", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const row = await createNamedMaster(Units, companyId, req.body, {
@@ -9414,7 +9744,7 @@ app.post("/companies/:companyId/units", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId/units/:id", async (req, res) => {
+app.put("/companies/:companyId/units/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await updateNamedMaster(Units, companyId, req.params.id, req.body, {
@@ -9432,7 +9762,7 @@ app.put("/companies/:companyId/units/:id", async (req, res) => {
   }
 });
 
-app.delete("/companies/:companyId/units/:id", async (req, res) => {
+app.delete("/companies/:companyId/units/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await deleteNamedMaster(Units, companyId, req.params.id, async (row) => {
@@ -9453,7 +9783,7 @@ app.get("/companies/:companyId/godowns", async (req, res) => {
   res.json(await listNamedMasters(Godowns, companyId, { createdAt: 1 }));
 });
 
-app.post("/companies/:companyId/godowns", async (req, res) => {
+app.post("/companies/:companyId/godowns", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const row = await createNamedMaster(Godowns, companyId, req.body, {
@@ -9469,7 +9799,7 @@ app.post("/companies/:companyId/godowns", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId/godowns/:id", async (req, res) => {
+app.put("/companies/:companyId/godowns/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await updateNamedMaster(Godowns, companyId, req.params.id, req.body, {
@@ -9487,7 +9817,7 @@ app.put("/companies/:companyId/godowns/:id", async (req, res) => {
   }
 });
 
-app.delete("/companies/:companyId/godowns/:id", async (req, res) => {
+app.delete("/companies/:companyId/godowns/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await deleteNamedMaster(Godowns, companyId, req.params.id);
@@ -9515,7 +9845,7 @@ app.get("/companies/:companyId/stock-categories", async (req, res) => {
   res.json(rows);
 });
 
-app.post("/companies/:companyId/stock-categories", async (req, res) => {
+app.post("/companies/:companyId/stock-categories", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const row = await createNamedMaster(StockCategories, companyId, req.body, {
@@ -9532,7 +9862,7 @@ app.post("/companies/:companyId/stock-categories", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId/stock-categories/:id", async (req, res) => {
+app.put("/companies/:companyId/stock-categories/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await updateNamedMaster(
@@ -9560,7 +9890,7 @@ app.put("/companies/:companyId/stock-categories/:id", async (req, res) => {
   }
 });
 
-app.delete("/companies/:companyId/stock-categories/:id", async (req, res) => {
+app.delete("/companies/:companyId/stock-categories/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await deleteNamedMaster(
@@ -9599,7 +9929,7 @@ app.get("/companies/:companyId/currencies", async (req, res) => {
   res.json(rows);
 });
 
-app.post("/companies/:companyId/currencies", async (req, res) => {
+app.post("/companies/:companyId/currencies", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const code = normalizeName(req.body.code);
@@ -9636,7 +9966,7 @@ app.post("/companies/:companyId/currencies", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId/currencies/:id", async (req, res) => {
+app.put("/companies/:companyId/currencies/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const id = new ObjectId(req.params.id);
@@ -9663,7 +9993,7 @@ app.put("/companies/:companyId/currencies/:id", async (req, res) => {
   }
 });
 
-app.delete("/companies/:companyId/currencies/:id", async (req, res) => {
+app.delete("/companies/:companyId/currencies/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const id = new ObjectId(req.params.id);
@@ -9721,7 +10051,7 @@ app.get("/companies/:companyId/employees/:id", async (req, res) => {
   }
 });
 
-app.post("/companies/:companyId/employees", async (req, res) => {
+app.post("/companies/:companyId/employees", requireCompanyWriteAccess(ROLE_GROUPS.payrollMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const generatedNumber = await generateEmployeeNumber(companyId);
@@ -9795,7 +10125,7 @@ app.post("/companies/:companyId/employees", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId/employees/:id", async (req, res) => {
+app.put("/companies/:companyId/employees/:id", requireCompanyWriteAccess(ROLE_GROUPS.payrollMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     const id = new ObjectId(req.params.id);
@@ -9871,7 +10201,7 @@ app.put("/companies/:companyId/employees/:id", async (req, res) => {
   }
 });
 
-app.delete("/companies/:companyId/employees/:id", async (req, res) => {
+app.delete("/companies/:companyId/employees/:id", requireCompanyWriteAccess(ROLE_GROUPS.payrollMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
     await Employees.deleteOne({
