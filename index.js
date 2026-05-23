@@ -16,6 +16,12 @@ const RATE_LIMIT_AUTH_WINDOW_MS = Number(process.env.RATE_LIMIT_AUTH_WINDOW_MS) 
 const RATE_LIMIT_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH_MAX) || 20;
 const RATE_LIMIT_WRITE_WINDOW_MS = Number(process.env.RATE_LIMIT_WRITE_WINDOW_MS) || 60 * 1000;
 const RATE_LIMIT_WRITE_MAX = Number(process.env.RATE_LIMIT_WRITE_MAX) || 120;
+const EMPLOYEE_SESSION_TTL_MS =
+  Number(process.env.EMPLOYEE_SESSION_TTL_MS) || 12 * 60 * 60 * 1000;
+const EMPLOYEE_SESSION_SECRET =
+  process.env.EMPLOYEE_SESSION_SECRET ||
+  process.env.SESSION_SECRET ||
+  crypto.createHash("sha256").update(String(MONGO_URI)).digest("hex");
 
 function parseAllowedOrigins(value = "") {
   return String(value || "")
@@ -118,8 +124,48 @@ function nameKey(value = "") {
   return normalizeName(value).toLowerCase();
 }
 
+function moneyToCents(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.round((numeric + Number.EPSILON) * 100);
+}
+
+function centsToMoney(cents) {
+  const numeric = Number(cents || 0);
+  if (!Number.isFinite(numeric)) return 0;
+  return numeric / 100;
+}
+
 function normalizeMoney(value) {
-  return Number(Number(value || 0).toFixed(2));
+  return centsToMoney(moneyToCents(value));
+}
+
+function sumMoney(...values) {
+  return normalizeMoney(
+    values.reduce((sum, value) => sum + moneyToCents(value), 0) / 100,
+  );
+}
+
+function subtractMoney(base, ...values) {
+  const cents = values.reduce(
+    (sum, value) => sum - moneyToCents(value),
+    moneyToCents(base),
+  );
+  return normalizeMoney(cents / 100);
+}
+
+function multiplyMoney(left, right) {
+  return normalizeMoney(Number(left || 0) * Number(right || 0));
+}
+
+function divideMoney(dividend, divisor) {
+  const numericDivisor = Number(divisor || 0);
+  if (!numericDivisor) return 0;
+  return normalizeMoney(Number(dividend || 0) / numericDivisor);
+}
+
+function moneyEquals(left, right) {
+  return moneyToCents(left) === moneyToCents(right);
 }
 
 function normalizePhone(value = "") {
@@ -199,6 +245,103 @@ function verifyCompanyPassword(password = "", auth = {}) {
   return crypto.timingSafeEqual(derived, expected);
 }
 
+function toBase64Url(value = "") {
+  return Buffer.from(String(value))
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function fromBase64Url(value = "") {
+  const normalized = String(value)
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
+  return Buffer.from(`${normalized}${padding}`, "base64").toString("utf8");
+}
+
+function signEmployeeSessionPayload(payload = {}) {
+  return crypto
+    .createHmac("sha256", EMPLOYEE_SESSION_SECRET)
+    .update(JSON.stringify(payload))
+    .digest("hex");
+}
+
+function createEmployeeSessionToken(employee, company) {
+  const now = Date.now();
+  const payload = {
+    sub: String(employee._id || ""),
+    companyId: String(company._id || employee.companyId || ""),
+    role: normalizeTextBlock(employee.accessControl?.role || ""),
+    name: normalizeTextBlock(employee.name || ""),
+    username: normalizeTextBlock(employee.accessControl?.username || ""),
+    iat: now,
+    exp: now + EMPLOYEE_SESSION_TTL_MS,
+    jti: crypto.randomBytes(12).toString("hex"),
+  };
+  const encodedPayload = toBase64Url(JSON.stringify(payload));
+  const signature = signEmployeeSessionPayload(payload);
+  return `${encodedPayload}.${signature}`;
+}
+
+function verifyEmployeeSessionToken(token = "") {
+  const raw = String(token || "").trim();
+  if (!raw || !raw.includes(".")) return null;
+  const [encodedPayload, signature] = raw.split(".");
+  if (!encodedPayload || !signature) return null;
+
+  try {
+    const payload = JSON.parse(fromBase64Url(encodedPayload));
+    const expectedSignature = signEmployeeSessionPayload(payload);
+    const actualBuffer = Buffer.from(String(signature), "hex");
+    const expectedBuffer = Buffer.from(String(expectedSignature), "hex");
+    if (
+      actualBuffer.length !== expectedBuffer.length ||
+      !crypto.timingSafeEqual(actualBuffer, expectedBuffer)
+    ) {
+      return null;
+    }
+
+    if (!payload?.sub || !payload?.companyId || Number(payload.exp || 0) < Date.now()) {
+      return null;
+    }
+
+    return payload;
+  } catch (error) {
+    return null;
+  }
+}
+
+function readBearerToken(req) {
+  const header = String(req.headers.authorization || "").trim();
+  if (!header.toLowerCase().startsWith("bearer ")) return "";
+  return header.slice(7).trim();
+}
+
+function getVerifiedSessionActor(req) {
+  if (req._verifiedSessionActor !== undefined) {
+    return req._verifiedSessionActor;
+  }
+
+  const token = readBearerToken(req);
+  const payload = verifyEmployeeSessionToken(token);
+  if (!payload) {
+    req._verifiedSessionActor = null;
+    return null;
+  }
+
+  req._verifiedSessionActor = {
+    id: payload.sub,
+    name: payload.name || payload.username || "Unknown User",
+    role: payload.role || "",
+    companyId: payload.companyId,
+    username: payload.username || "",
+    tokenPayload: payload,
+  };
+  return req._verifiedSessionActor;
+}
+
 function sanitizeCompany(company) {
   if (!company) return null;
   const auth = company.auth || {};
@@ -211,6 +354,18 @@ function sanitizeCompany(company) {
 }
 
 function getRequestActor(req) {
+  const verifiedActor = getVerifiedSessionActor(req);
+  if (verifiedActor) {
+    return {
+      id: verifiedActor.id || null,
+      name: verifiedActor.name || "Unknown User",
+      role: verifiedActor.role || "",
+      number: "",
+      companyId: verifiedActor.companyId || "",
+      username: verifiedActor.username || "",
+    };
+  }
+
   try {
     const raw = req.headers["x-user-context"];
     if (!raw) return null;
@@ -227,6 +382,8 @@ function getRequestActor(req) {
         "Unknown User",
       role: user.role || "",
       number: user.number || "",
+      companyId: user.companyId || "",
+      username: user.username || "",
     };
   } catch (error) {
     return null;
@@ -493,16 +650,20 @@ function voucherTotalAmount(voucher) {
 
   const accountingTotal = (voucher.lines || []).reduce(
     (sum, line) =>
-      Math.max(sum, Number(line.debit || 0), Number(line.credit || 0)),
+      Math.max(
+        moneyToCents(sum),
+        moneyToCents(line.debit || 0),
+        moneyToCents(line.credit || 0),
+      ),
     0,
   );
-  if (accountingTotal > 0) return normalizeMoney(accountingTotal);
+  if (accountingTotal > 0) return centsToMoney(accountingTotal);
 
   const inventoryTotal = (voucher.inventoryLines || []).reduce(
-    (sum, line) => normalizeMoney(sum + (Number(line.amount) || 0)),
+    (sum, line) => sum + moneyToCents(line.amount || 0),
     0,
   );
-  if (inventoryTotal > 0) return inventoryTotal;
+  if (inventoryTotal > 0) return centsToMoney(inventoryTotal);
 
   return 0;
 }
@@ -910,7 +1071,7 @@ async function resolveAuthorizedEmployee(companyId, req) {
     return { ok: true, bypass: true, employee: null };
   }
 
-  const actor = getRequestActor(req);
+  const actor = getVerifiedSessionActor(req);
   if (!actor?.id) {
     return {
       ok: false,
@@ -3809,8 +3970,6 @@ function summarizeBomBottleneck(bom = {}) {
 }
 
 async function buildManufacturingDashboard(companyId) {
-  await ensureCompanyCoreMasters(companyId);
-
   const [rawSummary, bomRows] = await Promise.all([
     buildStockSummary(companyId, null, null, {
       includeRoles: ["raw_material"],
@@ -4588,6 +4747,7 @@ app.post(
       ok: true,
       company: sanitizeCompany(company),
       user: buildEmployeeSessionUser(employee, company),
+      token: createEmployeeSessionToken(employee, company),
     });
   } catch (err) {
     console.error("Error authenticating employee:", err);
@@ -5262,11 +5422,13 @@ app.get(
 
       const [customer, vouchers] = await Promise.all([
         Customers.findOne({ companyId, phone }),
-        Vouchers.find({
-          companyId,
-          voucherName: { $regex: "^POS Voucher$", $options: "i" },
-          "customerSnapshot.phone": phone,
-        })
+        Vouchers.find(
+          activeVoucherFilter({
+            companyId,
+            voucherName: { $regex: "^POS Voucher$", $options: "i" },
+            "customerSnapshot.phone": phone,
+          }),
+        )
           .sort({ date: -1, createdAt: -1, _id: -1 })
           .toArray(),
       ]);
@@ -5398,12 +5560,12 @@ app.post("/companies/:companyId/pos-vouchers", requireCompanyWriteAccess(ROLE_GR
         const mrpRate = Number(row.mrpRate || rate || 0);
         const rowDiscountType = row.discountType || "percent";
         const rowDiscountValue = Number(row.discountValue || 0);
-        const grossAmount = normalizeMoney(qty * rate);
+        const grossAmount = multiplyMoney(qty, rate);
         const rowDiscountAmount =
           rowDiscountType === "percent"
-            ? normalizeMoney(grossAmount * (rowDiscountValue / 100))
+            ? multiplyMoney(grossAmount, rowDiscountValue / 100)
             : normalizeMoney(rowDiscountValue);
-        const amount = normalizeMoney(grossAmount - rowDiscountAmount);
+        const amount = subtractMoney(grossAmount, rowDiscountAmount);
         return {
           itemId: item._id,
           itemName: normalizeName(item.name),
@@ -5437,33 +5599,30 @@ app.post("/companies/:companyId/pos-vouchers", requireCompanyWriteAccess(ROLE_GR
       return res.status(400).json({ message: "No valid POS items found" });
     }
 
-    const subtotal = normalizeMoney(
-      inventoryLines.reduce((sum, row) => sum + Number(row.amount || 0), 0),
+    const subtotal = inventoryLines.reduce(
+      (sum, row) => sumMoney(sum, row.amount || 0),
+      0,
     );
     const invoiceDiscount =
       discountType === "percent"
-        ? normalizeMoney(subtotal * (Number(discountValue || 0) / 100))
+        ? multiplyMoney(subtotal, Number(discountValue || 0) / 100)
         : normalizeMoney(discountValue || 0);
     const rewardRedeemed = normalizeMoney(redeemedPoints || 0);
-    const totalAmount = normalizeMoney(
-      subtotal - invoiceDiscount - rewardRedeemed,
-    );
+    const totalAmount = subtractMoney(subtotal, invoiceDiscount, rewardRedeemed);
 
     const cashAmount = normalizeMoney(payments.cash || 0);
     const cardAmount = normalizeMoney(payments.card || 0);
-    const totalPaid = normalizeMoney(cashAmount + cardAmount);
+    const totalPaid = sumMoney(cashAmount, cardAmount);
 
-    if (normalizeMoney(totalPaid) !== normalizeMoney(totalAmount)) {
+    if (!moneyEquals(totalPaid, totalAmount)) {
       return res
         .status(400)
         .json({ message: "Payment total must match total amount payable" });
     }
 
-    const rewardEarned = normalizeMoney(
-      inventoryLines.reduce(
-        (sum, row) => sum + Number(row.mrpRate || 0) * Number(row.qty || 0),
-        0,
-      ),
+    const rewardEarned = inventoryLines.reduce(
+      (sum, row) => sumMoney(sum, multiplyMoney(row.mrpRate || 0, row.qty || 0)),
+      0,
     );
 
     const existingCustomer = await Customers.findOne({
@@ -5532,7 +5691,7 @@ app.post("/companies/:companyId/pos-vouchers", requireCompanyWriteAccess(ROLE_GR
         cashAmount,
         cardAmount,
         cashTendered: normalizeMoney(payments.cashTendered || 0),
-        changeAmount: normalizeMoney((payments.cashTendered || 0) - cashAmount),
+        changeAmount: subtractMoney(payments.cashTendered || 0, cashAmount),
       },
       createdAt: new Date(),
     };
@@ -5579,7 +5738,9 @@ app.get(
         Customers.find({ companyId })
           .sort({ lastPurchaseAt: -1, name: 1 })
           .toArray(),
-        Vouchers.find(voucherFilter).sort({ date: -1 }).toArray(),
+        Vouchers.find(activeVoucherFilter(voucherFilter))
+          .sort({ date: -1 })
+          .toArray(),
       ]);
 
       const uniqueCustomerIds = new Set(
@@ -5686,7 +5847,7 @@ app.get(
           voucherFilter.date.$lte = inclusiveTo;
         }
       }
-      const vouchers = await Vouchers.find(voucherFilter)
+      const vouchers = await Vouchers.find(activeVoucherFilter(voucherFilter))
         .sort({ date: -1 })
         .toArray();
 
@@ -5757,10 +5918,12 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      const vouchers = await Vouchers.find({
-        companyId,
-        voucherName: { $regex: "^POS Voucher$", $options: "i" },
-      })
+      const vouchers = await Vouchers.find(
+        activeVoucherFilter({
+          companyId,
+          voucherName: { $regex: "^POS Voucher$", $options: "i" },
+        }),
+      )
         .sort({ date: -1 })
         .toArray();
 
@@ -5834,10 +5997,12 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      const vouchers = await Vouchers.find({
-        companyId,
-        voucherName: { $regex: "^POS Voucher$", $options: "i" },
-      })
+      const vouchers = await Vouchers.find(
+        activeVoucherFilter({
+          companyId,
+          voucherName: { $regex: "^POS Voucher$", $options: "i" },
+        }),
+      )
         .sort({ date: -1 })
         .toArray();
 
@@ -5925,7 +6090,7 @@ app.get("/companies/:companyId/vouchers", async (req, res) => {
     }
   }
 
-  const list = await Vouchers.find(filter)
+  const list = await Vouchers.find(activeVoucherFilter(filter))
     .sort({ date: -1, createdAt: -1 })
     .toArray();
   res.json(list);
@@ -6346,10 +6511,12 @@ app.get("/companies/:companyId/vouchers/next-number", async (req, res) => {
     const [company, voucherType, vouchers] = await Promise.all([
       Companies.findOne({ _id: companyId }),
       VoucherTypes.findOne({ _id: voucherTypeObjectId, companyId }),
-      Vouchers.find({
-        companyId,
-        voucherTypeId: voucherTypeObjectId,
-      })
+      Vouchers.find(
+        activeVoucherFilter({
+          companyId,
+          voucherTypeId: voucherTypeObjectId,
+        }),
+      )
         .project({ number: 1 })
         .toArray(),
     ]);
@@ -6431,7 +6598,9 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
       ]).next(),
       Ledgers.find({ companyId }).toArray(),
       Vouchers.find(
-        toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+        activeVoucherFilter(
+          toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+        ),
       ).toArray(),
     ]);
 
@@ -6562,7 +6731,6 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
 app.get("/companies/:companyId/reports/profit-loss-drilldown", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
     const fromDate = safeDate(req.query.from);
     const toDate = safeDate(req.query.to);
 
@@ -6801,7 +6969,6 @@ app.get("/companies/:companyId/reports/profit-loss-drilldown", async (req, res) 
 app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
     const { from, to } = req.query;
 
     // Convert to real Dates
@@ -6976,7 +7143,6 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      await ensureCompanyCoreMasters(companyId);
 
       const mode =
         String(req.query.mode || "group").toLowerCase() === "ledger"
@@ -7002,7 +7168,9 @@ app.get(
           { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
         ]).toArray(),
         Vouchers.find(
-          toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+          activeVoucherFilter(
+            toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+          ),
         ).toArray(),
       ]);
 
@@ -7305,11 +7473,13 @@ app.get("/companies/:companyId/items", async (req, res) => {
       },
       { $unwind: { path: "$godownMaster", preserveNullAndEmptyArrays: true } },
     ]).toArray(),
-    Vouchers.find({
-      companyId,
-      voucherName: { $in: ["Purchase"] },
-      inventoryLines: { $exists: true, $ne: [] },
-    }).toArray(),
+    Vouchers.find(
+      activeVoucherFilter({
+        companyId,
+        voucherName: { $in: ["Purchase"] },
+        inventoryLines: { $exists: true, $ne: [] },
+      }),
+    ).toArray(),
   ]);
 
   const latestPurchaseByItem = new Map();
@@ -8267,7 +8437,6 @@ app.delete(
 app.get("/companies/:companyId/reports/stock-summary", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
     const fromDate = safeDate(req.query.from);
     const toDate = safeDate(req.query.to);
     const summary = await buildStockSummary(companyId, fromDate, toDate, {
@@ -8285,7 +8454,6 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      await ensureCompanyCoreMasters(companyId);
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       const summary = await buildStockGroupSummary(
@@ -8312,7 +8480,6 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      await ensureCompanyCoreMasters(companyId);
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       const summary = await buildInventoryDetailReport(
@@ -8343,7 +8510,6 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      await ensureCompanyCoreMasters(companyId);
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       res.json(
@@ -8393,7 +8559,6 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      await ensureCompanyCoreMasters(companyId);
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       const dimension = normalizeName(req.query.dimension || "stock-group")
@@ -8427,7 +8592,6 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      await ensureCompanyCoreMasters(companyId);
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       const level = normalizeName(req.query.level || "group").toLowerCase();
@@ -8458,7 +8622,6 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      await ensureCompanyCoreMasters(companyId);
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       const level = normalizeName(req.query.level || "ledger").toLowerCase();
@@ -8487,7 +8650,6 @@ app.get(
 app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
     const fromDate = safeDate(req.query.from);
     const toDate = safeDate(req.query.to);
 
@@ -8543,7 +8705,6 @@ app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
 app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
     const fromDate = safeDate(req.query.from);
     const toDate = safeDate(req.query.to);
 
@@ -8805,7 +8966,6 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
 app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
 
     const [
       groupsCount,
@@ -9078,7 +9238,9 @@ app.get("/companies/:companyId/reports/outstanding", async (req, res) => {
 
     const [vouchers, ledgers] = await Promise.all([
       Vouchers.find(
-        toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+        activeVoucherFilter(
+          toDate ? { companyId, date: { $lte: toDate } } : { companyId },
+        ),
       ).toArray(),
       Ledgers.aggregate([
         { $match: { companyId } },
@@ -9130,7 +9292,7 @@ app.get("/companies/:companyId/reports/cash-flow", async (req, res) => {
     const toDate = safeDate(req.query.to);
 
     const [vouchers, ledgers] = await Promise.all([
-      Vouchers.find({ companyId }).toArray(),
+      Vouchers.find(activeVoucherFilter({ companyId })).toArray(),
       Ledgers.aggregate([
         { $match: { companyId } },
         {
