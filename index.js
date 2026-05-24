@@ -140,18 +140,29 @@ function normalizeMoney(value) {
   return centsToMoney(moneyToCents(value));
 }
 
+function getVoucherTime(value) {
+  return value ? new Date(value).getTime() : 0;
+}
+
+function sortVouchersByDateAscending(vouchers = []) {
+  return vouchers.slice().sort((left, right) => {
+    return getVoucherTime(left?.date) - getVoucherTime(right?.date);
+  });
+}
+
 function sumMoney(...values) {
-  return normalizeMoney(
-    values.reduce((sum, value) => sum + moneyToCents(value), 0) / 100,
+  return centsToMoney(
+    values.reduce((sum, value) => sum + moneyToCents(value), 0),
   );
 }
 
 function subtractMoney(base, ...values) {
-  const cents = values.reduce(
+  return centsToMoney(
+    values.reduce(
     (sum, value) => sum - moneyToCents(value),
     moneyToCents(base),
+    ),
   );
-  return normalizeMoney(cents / 100);
 }
 
 function multiplyMoney(left, right) {
@@ -447,11 +458,11 @@ async function logAuditEvent({
 }
 
 function splitBalance(amount) {
-  const normalized = normalizeMoney(amount);
-  if (normalized >= 0) {
-    return { debit: normalized, credit: 0 };
+  const amountCents = moneyToCents(amount);
+  if (amountCents >= 0) {
+    return { debit: centsToMoney(amountCents), credit: 0 };
   }
-  return { debit: 0, credit: normalizeMoney(Math.abs(normalized)) };
+  return { debit: 0, credit: centsToMoney(Math.abs(amountCents)) };
 }
 
 function inferStockDirection(voucherName = "") {
@@ -1196,14 +1207,17 @@ async function resolveMasterName(collection, companyId, idOrName) {
 function summarizeLedgerBalances(ledgers, vouchers, fromDate, toDate) {
   const openingMap = new Map();
   const periodMap = new Map();
+  const fromTime = fromDate ? fromDate.getTime() : null;
+  const toTime = toDate ? toDate.getTime() : null;
 
   vouchers.forEach((voucher) => {
-    const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+    const voucherTime = getVoucherTime(voucher?.date);
+    const hasVoucherTime = voucherTime !== 0;
     const beforePeriod =
-      fromDate && voucherDate ? voucherDate < fromDate : false;
+      fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
     const inPeriod =
-      (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
-      (!toDate || (voucherDate && voucherDate <= toDate));
+      (fromTime === null || (hasVoucherTime && voucherTime >= fromTime)) &&
+      (toTime === null || (hasVoucherTime && voucherTime <= toTime));
 
     getAccountingReportLines(voucher).forEach((line) => {
       const ledgerKey = String(line.ledgerId);
@@ -1211,38 +1225,37 @@ function summarizeLedgerBalances(ledgers, vouchers, fromDate, toDate) {
         const current = openingMap.get(ledgerKey) || 0;
         openingMap.set(
           ledgerKey,
-          normalizeMoney(
-            current + (Number(line.debit) || 0) - (Number(line.credit) || 0),
-          ),
+          current + moneyToCents(line.debit || 0) - moneyToCents(line.credit || 0),
         );
       }
 
       if (inPeriod) {
-        const current = periodMap.get(ledgerKey) || { debit: 0, credit: 0 };
-        current.debit = normalizeMoney(
-          current.debit + (Number(line.debit) || 0),
-        );
-        current.credit = normalizeMoney(
-          current.credit + (Number(line.credit) || 0),
-        );
+        const current = periodMap.get(ledgerKey) || { debitCents: 0, creditCents: 0 };
+        current.debitCents += moneyToCents(line.debit || 0);
+        current.creditCents += moneyToCents(line.credit || 0);
         periodMap.set(ledgerKey, current);
       }
     });
   });
 
   return ledgers.map((ledger) => {
-    const openingMovement = openingMap.get(String(ledger._id)) || 0;
-    const fixedOpening =
+    const openingMovementCents = openingMap.get(String(ledger._id)) || 0;
+    const fixedOpeningCents =
       (ledger.openingDrCr === "DR" ? 1 : -1) *
-      (Number(ledger.openingBalance) || 0);
-    const opening = normalizeMoney(fixedOpening + openingMovement);
+      moneyToCents(ledger.openingBalance || 0);
+    const openingCents = fixedOpeningCents + openingMovementCents;
     const periodMovement = periodMap.get(String(ledger._id)) || {
-      debit: 0,
-      credit: 0,
+      debitCents: 0,
+      creditCents: 0,
     };
-    const debit = normalizeMoney(periodMovement.debit || 0);
-    const credit = normalizeMoney(periodMovement.credit || 0);
-    const closing = normalizeMoney(opening + debit - credit);
+    const debit = centsToMoney(periodMovement.debitCents || 0);
+    const credit = centsToMoney(periodMovement.creditCents || 0);
+    const closingCents =
+      openingCents +
+      (periodMovement.debitCents || 0) -
+      (periodMovement.creditCents || 0);
+    const opening = centsToMoney(openingCents);
+    const closing = centsToMoney(closingCents);
 
     return {
       ...ledger,
@@ -1521,6 +1534,104 @@ function buildProfitLossSnapshot({
   };
 }
 
+function summarizeDashboardBalances(balances) {
+  const summary = {
+    cashBank: 0,
+    receivables: 0,
+    payables: 0,
+    salesTotal: 0,
+    purchaseTotal: 0,
+    directIncome: 0,
+    directExpense: 0,
+    indirectIncome: 0,
+    indirectExpense: 0,
+    currentAssets: 0,
+    currentLiabilities: 0,
+    cashInHandTotal: 0,
+    bankBalanceTotal: 0,
+    bankLedgers: [],
+  };
+
+  balances.forEach((row) => {
+    const groupNameKey = nameKey(row.group?.name || "");
+    const topLevelGroupNameKey = nameKey(
+      row.group?.parentId ? "" : row.group?.name || "",
+    );
+
+    if (["cash-in-hand", "bank accounts"].includes(groupNameKey)) {
+      summary.cashBank = normalizeMoney(summary.cashBank + row.closing);
+    }
+    if (groupNameKey === "sundry debtors") {
+      summary.receivables = normalizeMoney(
+        summary.receivables + row.closingDebit,
+      );
+    }
+    if (groupNameKey === "sundry creditors") {
+      summary.payables = normalizeMoney(summary.payables + row.closingCredit);
+    }
+    if (groupNameKey === "sales accounts") {
+      summary.salesTotal = normalizeMoney(
+        summary.salesTotal + row.credit - row.debit,
+      );
+    }
+    if (groupNameKey === "purchase accounts") {
+      summary.purchaseTotal = normalizeMoney(
+        summary.purchaseTotal + row.debit - row.credit,
+      );
+    }
+    if (row.group?.nature === "INCOME") {
+      const amount = normalizeMoney(row.credit - row.debit);
+      if (row.group?.affectsGrossProfit) {
+        summary.directIncome = normalizeMoney(summary.directIncome + amount);
+      } else {
+        summary.indirectIncome = normalizeMoney(summary.indirectIncome + amount);
+      }
+    }
+    if (row.group?.nature === "EXPENSE") {
+      const amount = normalizeMoney(row.debit - row.credit);
+      if (row.group?.affectsGrossProfit) {
+        summary.directExpense = normalizeMoney(summary.directExpense + amount);
+      } else {
+        summary.indirectExpense = normalizeMoney(
+          summary.indirectExpense + amount,
+        );
+      }
+    }
+    if (topLevelGroupNameKey === "current assets") {
+      summary.currentAssets = normalizeMoney(
+        summary.currentAssets + row.closingDebit,
+      );
+    }
+    if (topLevelGroupNameKey === "current liabilities") {
+      summary.currentLiabilities = normalizeMoney(
+        summary.currentLiabilities + row.closingCredit,
+      );
+    }
+    if (groupNameKey === "cash-in-hand") {
+      summary.cashInHandTotal = normalizeMoney(
+        summary.cashInHandTotal + row.closingDebit,
+      );
+    }
+    if (groupNameKey === "bank accounts") {
+      const closingBalance = normalizeMoney(row.closingDebit || row.closing);
+      summary.bankBalanceTotal = normalizeMoney(
+        summary.bankBalanceTotal + row.closingDebit,
+      );
+      summary.bankLedgers.push({
+        ledgerId: row._id,
+        ledgerName: row.name,
+        closingBalance,
+      });
+    }
+  });
+
+  summary.bankLedgers.sort(
+    (left, right) => right.closingBalance - left.closingBalance,
+  );
+  summary.bankLedgers = summary.bankLedgers.slice(0, 5);
+  return summary;
+}
+
 function findGroupNodeById(tree, targetId) {
   for (const node of tree || []) {
     if (String(node.id) === String(targetId)) return node;
@@ -1531,10 +1642,10 @@ function findGroupNodeById(tree, targetId) {
 }
 
 function balanceValueFromSplit(source = {}) {
-  return normalizeMoney(
+  return centsToMoney(
     Math.max(
-      Number(source.closingDebit || 0),
-      Number(source.closingCredit || 0),
+      moneyToCents(source.closingDebit || 0),
+      moneyToCents(source.closingCredit || 0),
     ),
   );
 }
@@ -1742,6 +1853,8 @@ async function buildStockSummary(
   const items = allItems.filter((item) => itemMatchesRoleFilter(item, options));
   const itemIdSet = new Set(items.map((item) => String(item._id)));
   const groupsById = new Map(groups.map((group) => [String(group._id), group]));
+  const fromTime = fromDate ? fromDate.getTime() : null;
+  const toTime = toDate ? toDate.getTime() : null;
   const itemStateMap = new Map(
     items.map((item) => {
       const openingQty = normalizeMoney(Number(item.openingQty) || 0);
@@ -1767,26 +1880,20 @@ async function buildStockSummary(
     }),
   );
 
-  vouchers
-    .slice()
-    .sort((left, right) => {
-      const leftTime = left?.date ? new Date(left.date).getTime() : 0;
-      const rightTime = right?.date ? new Date(right.date).getTime() : 0;
-      return leftTime - rightTime;
-    })
-    .forEach((voucher) => {
+  sortVouchersByDateAscending(vouchers).forEach((voucher) => {
       if (!Array.isArray(voucher.inventoryLines)) {
         return;
       }
 
-      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+      const voucherTime = getVoucherTime(voucher?.date);
+      const hasVoucherTime = voucherTime !== 0;
       const beforePeriod =
-        fromDate && voucherDate ? voucherDate < fromDate : false;
+        fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
       const inPeriod =
-        !fromDate ||
-        (voucherDate &&
-          voucherDate >= fromDate &&
-          (!toDate || voucherDate <= toDate));
+        fromTime === null ||
+        (hasVoucherTime &&
+          voucherTime >= fromTime &&
+          (toTime === null || voucherTime <= toTime));
 
       voucher.inventoryLines.forEach((line) => {
         if (!line?.itemId) return;
@@ -1982,6 +2089,8 @@ async function buildInventoryDetailReport(
   const itemIdSet = new Set(items.map((item) => String(item._id)));
   const groupsById = new Map(groups.map((group) => [String(group._id), group]));
   const ledgerById = new Map(ledgers.map((ledger) => [String(ledger._id), ledger]));
+  const fromTime = fromDate ? fromDate.getTime() : null;
+  const toTime = toDate ? toDate.getTime() : null;
 
   function isDescendantGroup(groupIdValue, ancestorGroupId) {
     if (!ancestorGroupId) return true;
@@ -2026,14 +2135,7 @@ async function buildInventoryDetailReport(
     }),
   );
 
-  vouchers
-    .slice()
-    .sort((left, right) => {
-      const leftTime = left?.date ? new Date(left.date).getTime() : 0;
-      const rightTime = right?.date ? new Date(right.date).getTime() : 0;
-      return leftTime - rightTime;
-    })
-    .forEach((voucher) => {
+  sortVouchersByDateAscending(vouchers).forEach((voucher) => {
       const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
       const partyLedgerId = String(partyLedger?._id || "");
       const partyGroupId = String(partyLedger?.groupId || "");
@@ -2057,14 +2159,15 @@ async function buildInventoryDetailReport(
       }
       if (!Array.isArray(voucher.inventoryLines)) return;
 
-      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+      const voucherTime = getVoucherTime(voucher?.date);
+      const hasVoucherTime = voucherTime !== 0;
       const beforePeriod =
-        fromDate && voucherDate ? voucherDate < fromDate : false;
+        fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
       const inPeriod =
-        !fromDate ||
-        (voucherDate &&
-          voucherDate >= fromDate &&
-          (!toDate || voucherDate <= toDate));
+        fromTime === null ||
+        (hasVoucherTime &&
+          voucherTime >= fromTime &&
+          (toTime === null || voucherTime <= toTime));
 
       voucher.inventoryLines.forEach((line) => {
         if (!line?.itemId) return;
@@ -2676,6 +2779,8 @@ async function buildInventoryMovementDimensionReport(
   );
   const itemMap = new Map(items.map((item) => [String(item._id), item]));
   const groupById = new Map(groups.map((group) => [String(group._id), group]));
+  const fromTime = fromDate ? fromDate.getTime() : null;
+  const toTime = toDate ? toDate.getTime() : null;
   const usePartyPerspective = dimension === "ledger" || dimension === "group";
   const ledgerStateMap = new Map();
 
@@ -2703,28 +2808,22 @@ async function buildInventoryMovementDimensionReport(
     return false;
   }
 
-  vouchers
-    .slice()
-    .sort((left, right) => {
-      const leftTime = left?.date ? new Date(left.date).getTime() : 0;
-      const rightTime = right?.date ? new Date(right.date).getTime() : 0;
-      return leftTime - rightTime;
-    })
-    .forEach((voucher) => {
+  sortVouchersByDateAscending(vouchers).forEach((voucher) => {
       if (requestedSalesPersonId) {
         if (!/^sales$/i.test(String(voucher.voucherName || ""))) return;
         if (!voucherMatchesSalesPerson(voucher, requestedSalesPersonId)) return;
       }
       if (!Array.isArray(voucher.inventoryLines)) return;
 
-      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+      const voucherTime = getVoucherTime(voucher?.date);
+      const hasVoucherTime = voucherTime !== 0;
       const beforePeriod =
-        fromDate && voucherDate ? voucherDate < fromDate : false;
+        fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
       const inPeriod =
-        !fromDate ||
-        (voucherDate &&
-          voucherDate >= fromDate &&
-          (!toDate || voucherDate <= toDate));
+        fromTime === null ||
+        (hasVoucherTime &&
+          voucherTime >= fromTime &&
+          (toTime === null || voucherTime <= toTime));
 
       const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
       if (!partyLedger) return;
@@ -3223,14 +3322,15 @@ async function buildPartyMovementDetailReport(
       const qty = normalizeMoney(Number(line.qty || 0));
       const rate = normalizeMoney(Number(line.rate || 0));
       const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
-      const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+      const voucherTime = getVoucherTime(voucher?.date);
+      const hasVoucherTime = voucherTime !== 0;
       const beforePeriod =
-        fromDate && voucherDate ? voucherDate < fromDate : false;
+        fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
       const inPeriod =
-        !fromDate ||
-        (voucherDate &&
-          voucherDate >= fromDate &&
-          (!toDate || voucherDate <= toDate));
+        fromTime === null ||
+        (hasVoucherTime &&
+          voucherTime >= fromTime &&
+          (toTime === null || voucherTime <= toTime));
 
       if (beforePeriod) {
         state.metrics.openingQty = normalizeMoney(
@@ -4761,7 +4861,15 @@ app.get(
   async (req, res) => {
     try {
       const companyId = new ObjectId(req.params.companyId);
-      const { from = "", to = "", action = "", entityType = "", actorId = "", search = "" } =
+      const {
+        from = "",
+        to = "",
+        action = "",
+        entityType = "",
+        entityId = "",
+        actorId = "",
+        search = "",
+      } =
         req.query || {};
 
       const filter = { companyId };
@@ -4772,6 +4880,13 @@ app.get(
 
       if (entityType) {
         filter.entityType = normalizeTextBlock(entityType);
+      }
+
+      if (entityId) {
+        const normalizedEntityId = normalizeTextBlock(entityId);
+        filter.entityId = ObjectId.isValid(normalizedEntityId)
+          ? new ObjectId(normalizedEntityId)
+          : normalizedEntityId;
       }
 
       if (actorId) {
@@ -6611,13 +6726,13 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
     const ledgerMap = new Map(
       ledgers.map((row) => [String(row._id), row.name]),
     );
-    const fixedOpening =
+    const fixedOpeningCents =
       (ledger.openingDrCr === "DR" ? 1 : -1) *
-      (Number(ledger.openingBalance) || 0);
+      moneyToCents(ledger.openingBalance || 0);
 
-    let movementBeforeFrom = 0;
-    let periodDebit = 0;
-    let periodCredit = 0;
+    let movementBeforeFromCents = 0;
+    let periodDebitCents = 0;
+    let periodCreditCents = 0;
     const entries = [];
 
     vouchers
@@ -6640,18 +6755,18 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
         reportLines.forEach((line, lineIndex) => {
           if (String(line.ledgerId) !== String(ledgerId)) return;
 
-          const debit = Number(line.debit || 0);
-          const credit = Number(line.credit || 0);
+          const debit = normalizeMoney(line.debit || 0);
+          const credit = normalizeMoney(line.credit || 0);
+          const debitCents = moneyToCents(debit);
+          const creditCents = moneyToCents(credit);
 
           if (beforePeriod) {
-            movementBeforeFrom = normalizeMoney(
-              movementBeforeFrom + debit - credit,
-            );
+            movementBeforeFromCents += debitCents - creditCents;
           }
 
           if (inPeriod) {
-            periodDebit = normalizeMoney(periodDebit + debit);
-            periodCredit = normalizeMoney(periodCredit + credit);
+            periodDebitCents += debitCents;
+            periodCreditCents += creditCents;
 
             const counterpart = (voucher.lines || [])
               .filter(
@@ -6691,18 +6806,21 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
         });
       });
 
-    let runningBalance = normalizeMoney(fixedOpening + movementBeforeFrom);
+    let runningBalanceCents = fixedOpeningCents + movementBeforeFromCents;
     const entriesWithRunning = entries.map((entry) => {
-      runningBalance = normalizeMoney(
-        runningBalance + Number(entry.debit || 0) - Number(entry.credit || 0),
-      );
+      runningBalanceCents +=
+        moneyToCents(entry.debit || 0) - moneyToCents(entry.credit || 0);
       return {
         ...entry,
-        runningBalance,
+        runningBalance: centsToMoney(runningBalanceCents),
       };
     });
 
-    const openingBalance = normalizeMoney(fixedOpening + movementBeforeFrom);
+    const openingBalance = centsToMoney(
+      fixedOpeningCents + movementBeforeFromCents,
+    );
+    const periodDebit = centsToMoney(periodDebitCents);
+    const periodCredit = centsToMoney(periodCreditCents);
 
     res.json({
       ledger: {
@@ -6711,14 +6829,14 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
         groupName: ledger.group?.name || "",
       },
       openingBalance,
-      fixedOpeningBalance: normalizeMoney(fixedOpening),
-      movementBeforeFrom,
+      fixedOpeningBalance: centsToMoney(fixedOpeningCents),
+      movementBeforeFrom: centsToMoney(movementBeforeFromCents),
       totals: {
         debit: periodDebit,
         credit: periodCredit,
       },
-      closingBalance: normalizeMoney(
-        openingBalance + periodDebit - periodCredit,
+      closingBalance: centsToMoney(
+        moneyToCents(openingBalance) + periodDebitCents - periodCreditCents,
       ),
       entries: entriesWithRunning,
     });
@@ -6926,21 +7044,24 @@ app.get("/companies/:companyId/reports/profit-loss-drilldown", async (req, res) 
       });
     }
 
-    const totalDebit = normalizeMoney(
-      entries.reduce((sum, entry) => sum + Number(entry.debit || 0), 0),
+    const totalDebitCents = entries.reduce(
+      (sum, entry) => sum + moneyToCents(entry.debit || 0),
+      0,
     );
-    const totalCredit = normalizeMoney(
-      entries.reduce((sum, entry) => sum + Number(entry.credit || 0), 0),
+    const totalCreditCents = entries.reduce(
+      (sum, entry) => sum + moneyToCents(entry.credit || 0),
+      0,
     );
+    const totalDebit = centsToMoney(totalDebitCents);
+    const totalCredit = centsToMoney(totalCreditCents);
 
-    let runningBalance = 0;
+    let runningBalanceCents = 0;
     const entriesWithRunning = entries.map((entry) => {
-      runningBalance = normalizeMoney(
-        runningBalance + Number(entry.debit || 0) - Number(entry.credit || 0),
-      );
+      runningBalanceCents +=
+        moneyToCents(entry.debit || 0) - moneyToCents(entry.credit || 0);
       return {
         ...entry,
-        runningBalance,
+        runningBalance: centsToMoney(runningBalanceCents),
       };
     });
 
@@ -6957,7 +7078,7 @@ app.get("/companies/:companyId/reports/profit-loss-drilldown", async (req, res) 
         debit: totalDebit,
         credit: totalCredit,
       },
-      closingBalance: normalizeMoney(totalDebit - totalCredit),
+      closingBalance: centsToMoney(totalDebitCents - totalCreditCents),
       entries: entriesWithRunning,
     });
   } catch (err) {
@@ -6997,7 +7118,10 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
 
     const openingMap = new Map();
     openingMoves.forEach((m) =>
-      openingMap.set(String(m._id), (m.debit || 0) - (m.credit || 0)),
+      openingMap.set(
+        String(m._id),
+        moneyToCents(m.debit || 0) - moneyToCents(m.credit || 0),
+      ),
     );
 
     // -----------------------------------------------------
@@ -7045,22 +7169,27 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
     // 4️⃣ FINAL TRIAL BALANCE ROW CALCULATION
     // -----------------------------------------------------
     const rows = ledgers.map((l) => {
-      const openingMovement = openingMap.get(String(l._id)) || 0;
-      const fixedOpening =
-        (l.openingDrCr === "DR" ? 1 : -1) * (l.openingBalance || 0);
+      const openingMovementCents = openingMap.get(String(l._id)) || 0;
+      const fixedOpeningCents =
+        (l.openingDrCr === "DR" ? 1 : -1) *
+        moneyToCents(l.openingBalance || 0);
 
       // TRUE OPENING = fixed opening + all movements before selected FROM
-      const opening = fixedOpening + openingMovement;
+      const openingCents = fixedOpeningCents + openingMovementCents;
 
       const periodMovement = periodMap.get(String(l._id)) || {
         debit: 0,
         credit: 0,
       };
 
-      const debit = periodMovement.debit || 0;
-      const credit = periodMovement.credit || 0;
+      const debitCents = moneyToCents(periodMovement.debit || 0);
+      const creditCents = moneyToCents(periodMovement.credit || 0);
+      const debit = centsToMoney(debitCents);
+      const credit = centsToMoney(creditCents);
 
-      const closing = opening + (debit - credit);
+      const closingCents = openingCents + debitCents - creditCents;
+      const opening = centsToMoney(openingCents);
+      const closing = centsToMoney(closingCents);
 
       const openingSide = splitBalance(opening);
       const closingSide = splitBalance(closing);
@@ -7083,7 +7212,29 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
       };
     });
 
-    const groups = await Groups.find({ companyId }).toArray();
+    const allGroups = await Groups.find({ companyId }).toArray();
+    const groupById = new Map(
+      allGroups.map((group) => [String(group._id), group]),
+    );
+    const stockRoot = allGroups.find((group) =>
+      ["stock-in-trade", "stock in trade", "primary"].includes(
+        nameKey(group.name),
+      ),
+    );
+
+    const groups = allGroups.filter((group) => {
+      if (!stockRoot) return true;
+      let current = group;
+      while (current) {
+        if (String(current._id) === String(stockRoot._id)) {
+          return false;
+        }
+        current = current.parentId
+          ? groupById.get(String(current.parentId))
+          : null;
+      }
+      return true;
+    });
     const tree = buildGroupedBalanceTree(
       groups,
       rows.map((row) => ({
@@ -7988,7 +8139,29 @@ app.get("/companies/:companyId/chart-of-accounts/groups", async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
 
-    const groups = await Groups.find({ companyId }).toArray();
+    const allGroups = await Groups.find({ companyId }).toArray();
+    const groupById = new Map(
+      allGroups.map((group) => [String(group._id), group]),
+    );
+    const stockRoot = allGroups.find(
+      (group) =>
+        group.systemKey === "stock-in-trade" ||
+        ["stock-in-trade", "stock in trade"].includes(nameKey(group.name)),
+    );
+
+    const groups = allGroups.filter((group) => {
+      if (!stockRoot) return true;
+      let current = group;
+      while (current) {
+        if (String(current._id) === String(stockRoot._id)) {
+          return false;
+        }
+        current = current.parentId
+          ? groupById.get(String(current.parentId))
+          : null;
+      }
+      return true;
+    });
 
     // Build parent → children map
     const childrenMap = new Map(); // parentId(string|null) -> [groups]
@@ -8009,6 +8182,7 @@ app.get("/companies/:companyId/chart-of-accounts/groups", async (req, res) => {
       const kids = childrenMap.get(parentKey) || [];
       for (const g of kids) {
         ordered.push({
+          type: "group",
           ...g,
           level, // depth for indentation
         });
@@ -8032,51 +8206,58 @@ app.get("/companies/:companyId/chart-of-accounts/ledgers", async (req, res) => {
 
     const groups = await Groups.find({ companyId }).toArray();
     const ledgers = await Ledgers.find({ companyId }).toArray();
-    const groupMap = new Map(groups.map((group) => [String(group._id), group]));
-    const depthCache = new Map();
+    const childGroups = new Map();
+    const groupLedgers = new Map();
 
-    function getGroupDepth(groupId) {
-      const key = String(groupId || "");
-      if (!key) return 0;
-      if (depthCache.has(key)) return depthCache.get(key);
-      const group = groupMap.get(key);
-      if (!group) {
-        depthCache.set(key, 0);
-        return 0;
-      }
-      const depth = group.parentId ? getGroupDepth(group.parentId) + 1 : 0;
-      depthCache.set(key, depth);
-      return depth;
+    groups.forEach((group) => {
+      const parentKey = group.parentId ? String(group.parentId) : "ROOT";
+      if (!childGroups.has(parentKey)) childGroups.set(parentKey, []);
+      childGroups.get(parentKey).push(group);
+    });
+
+    ledgers.forEach((ledger) => {
+      const groupKey = ledger.groupId ? String(ledger.groupId) : "ROOT";
+      if (!groupLedgers.has(groupKey)) groupLedgers.set(groupKey, []);
+      groupLedgers.get(groupKey).push(ledger);
+    });
+
+    for (const list of childGroups.values()) {
+      list.sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+    }
+    for (const list of groupLedgers.values()) {
+      list.sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
     }
 
-    function getGroupPath(groupId) {
-      const names = [];
-      let current = groupMap.get(String(groupId || ""));
-      while (current) {
-        names.unshift(current.name);
-        current = current.parentId
-          ? groupMap.get(String(current.parentId))
-          : null;
-      }
-      return names.join(" / ");
-    }
+    const result = [];
 
-    const result = ledgers
-      .map((ledger) => ({
-        type: "ledger",
-        id: ledger._id,
-        name: ledger.name,
-        level: getGroupDepth(ledger.groupId),
-        groupPath: getGroupPath(ledger.groupId),
-        parentId: null,
-      }))
-      .sort((left, right) => {
-        if (left.level !== right.level) return left.level - right.level;
-        if (left.groupPath !== right.groupPath) {
-          return left.groupPath.localeCompare(right.groupPath);
-        }
-        return left.name.localeCompare(right.name);
+    function walkGroups(parentKey = "ROOT", level = 0) {
+      const currentGroups = childGroups.get(parentKey) || [];
+      currentGroups.forEach((group) => {
+        const groupId = String(group._id);
+        result.push({
+          type: "group",
+          id: group._id,
+          parentId: group.parentId ? String(group.parentId) : null,
+          name: group.name,
+          level,
+        });
+
+        walkGroups(groupId, level + 1);
+
+        const currentLedgers = groupLedgers.get(groupId) || [];
+        currentLedgers.forEach((ledger) => {
+          result.push({
+            type: "ledger",
+            id: ledger._id,
+            parentId: groupId,
+            name: ledger.name,
+            level: level + 1,
+          });
+        });
       });
+    }
+
+    walkGroups();
 
     res.json(result);
   } catch (err) {
@@ -9007,61 +9188,23 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
       monthMap.set(key, { label, sales: 0, purchase: 0 });
     }
 
-    const cashBank = balances
-      .filter((row) =>
-        ["cash-in-hand", "bank accounts"].includes(
-          nameKey(row.group?.name || ""),
-        ),
-      )
-      .reduce((sum, row) => normalizeMoney(sum + row.closing), 0);
-
-    const receivables = balances
-      .filter((row) => nameKey(row.group?.name || "") === "sundry debtors")
-      .reduce((sum, row) => normalizeMoney(sum + row.closingDebit), 0);
-
-    const payables = balances
-      .filter((row) => nameKey(row.group?.name || "") === "sundry creditors")
-      .reduce((sum, row) => normalizeMoney(sum + row.closingCredit), 0);
-
-    const salesTotal = balances
-      .filter((row) => nameKey(row.group?.name || "") === "sales accounts")
-      .reduce((sum, row) => normalizeMoney(sum + row.credit - row.debit), 0);
-
-    const purchaseTotal = balances
-      .filter((row) => nameKey(row.group?.name || "") === "purchase accounts")
-      .reduce((sum, row) => normalizeMoney(sum + row.debit - row.credit), 0);
-
-    const directIncome = balances
-      .filter(
-        (row) =>
-          row.group?.nature === "INCOME" &&
-          Boolean(row.group?.affectsGrossProfit),
-      )
-      .reduce((sum, row) => normalizeMoney(sum + row.credit - row.debit), 0);
-
-    const directExpense = balances
-      .filter(
-        (row) =>
-          row.group?.nature === "EXPENSE" &&
-          Boolean(row.group?.affectsGrossProfit),
-      )
-      .reduce((sum, row) => normalizeMoney(sum + row.debit - row.credit), 0);
-
-    const indirectIncome = balances
-      .filter(
-        (row) =>
-          row.group?.nature === "INCOME" &&
-          !Boolean(row.group?.affectsGrossProfit),
-      )
-      .reduce((sum, row) => normalizeMoney(sum + row.credit - row.debit), 0);
-
-    const indirectExpense = balances
-      .filter(
-        (row) =>
-          row.group?.nature === "EXPENSE" &&
-          !Boolean(row.group?.affectsGrossProfit),
-      )
-      .reduce((sum, row) => normalizeMoney(sum + row.debit - row.credit), 0);
+    const balanceSummary = summarizeDashboardBalances(balances);
+    const {
+      cashBank,
+      receivables,
+      payables,
+      salesTotal,
+      purchaseTotal,
+      directIncome,
+      directExpense,
+      indirectIncome,
+      indirectExpense,
+      currentAssets,
+      currentLiabilities,
+      cashInHandTotal,
+      bankBalanceTotal,
+      bankLedgers,
+    } = balanceSummary;
 
     const grossProfit = normalizeMoney(directIncome - directExpense);
     const netProfit = normalizeMoney(
@@ -9085,40 +9228,6 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
       }
       monthMap.set(key, current);
     });
-
-    const currentAssets = balances
-      .filter(
-        (row) =>
-          nameKey(row.group?.parentId ? "" : row.group?.name || "") ===
-          "current assets",
-      )
-      .reduce((sum, row) => normalizeMoney(sum + row.closingDebit), 0);
-
-    const currentLiabilities = balances
-      .filter(
-        (row) =>
-          nameKey(row.group?.parentId ? "" : row.group?.name || "") ===
-          "current liabilities",
-      )
-      .reduce((sum, row) => normalizeMoney(sum + row.closingCredit), 0);
-
-    const cashInHandTotal = balances
-      .filter((row) => nameKey(row.group?.name || "") === "cash-in-hand")
-      .reduce((sum, row) => normalizeMoney(sum + row.closingDebit), 0);
-
-    const bankBalanceTotal = balances
-      .filter((row) => nameKey(row.group?.name || "") === "bank accounts")
-      .reduce((sum, row) => normalizeMoney(sum + row.closingDebit), 0);
-
-    const bankLedgers = balances
-      .filter((row) => nameKey(row.group?.name || "") === "bank accounts")
-      .map((row) => ({
-        ledgerId: row._id,
-        ledgerName: row.name,
-        closingBalance: normalizeMoney(row.closingDebit || row.closing),
-      }))
-      .sort((left, right) => right.closingBalance - left.closingBalance)
-      .slice(0, 5);
 
     const averageInventory = normalizeMoney(
       (Number(stockSummary.totals.openingValue || 0) +
