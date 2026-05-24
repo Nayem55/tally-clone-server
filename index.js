@@ -491,6 +491,56 @@ function getPartyMovementDescriptor(voucherName = "") {
   return null;
 }
 
+function getStockReportMovementDescriptor(voucherName = "", line = {}) {
+  const partyDescriptor = getPartyMovementDescriptor(voucherName);
+  if (partyDescriptor) {
+    return {
+      bucket: partyDescriptor.bucket,
+      sign: partyDescriptor.sign,
+      directionLabel: partyDescriptor.directionLabel,
+      affectsRate:
+        partyDescriptor.bucket === "inward" && partyDescriptor.sign > 0,
+    };
+  }
+
+  const explicit = nameKey(line.direction || "");
+  if (["in", "inward"].includes(explicit)) {
+    return {
+      bucket: "inward",
+      sign: 1,
+      directionLabel: "IN",
+      affectsRate: true,
+    };
+  }
+  if (["out", "outward"].includes(explicit)) {
+    return {
+      bucket: "outward",
+      sign: 1,
+      directionLabel: "OUT",
+      affectsRate: false,
+    };
+  }
+
+  const rawDirection = inferStockDirection(voucherName);
+  if (rawDirection > 0) {
+    return {
+      bucket: "inward",
+      sign: 1,
+      directionLabel: "IN",
+      affectsRate: true,
+    };
+  }
+  if (rawDirection < 0) {
+    return {
+      bucket: "outward",
+      sign: 1,
+      directionLabel: "OUT",
+      affectsRate: false,
+    };
+  }
+  return null;
+}
+
 function inventoryRoleKey(value = "") {
   const key = nameKey(value).replace(/[\s-]+/g, "_");
   if (["raw_material", "rawmaterial", "raw"].includes(key))
@@ -662,7 +712,7 @@ function voucherTotalAmount(voucher) {
   const accountingTotal = (voucher.lines || []).reduce(
     (sum, line) =>
       Math.max(
-        moneyToCents(sum),
+        sum,
         moneyToCents(line.debit || 0),
         moneyToCents(line.credit || 0),
       ),
@@ -1911,8 +1961,11 @@ async function buildStockSummary(
           },
         };
 
-        const direction = getInventoryLineDirection(line, voucher.voucherName);
-        if (direction === 0) return;
+        const movement = getStockReportMovementDescriptor(
+          voucher.voucherName,
+          line,
+        );
+        if (!movement) return;
 
         const qty = normalizeMoney(Number(line.qty) || 0);
         const purchaseRate = normalizeMoney(
@@ -1922,10 +1975,15 @@ async function buildStockSummary(
           Number(line.rate) || state.currentRate || purchaseRate || 0,
         );
 
-        if (direction > 0) {
+        if (movement.bucket === "inward") {
+          const inwardValue = normalizeMoney(qty * purchaseRate);
           if (beforePeriod) {
-            state.currentQty = normalizeMoney(state.currentQty + qty);
-            state.currentRate = purchaseRate;
+            state.currentQty = normalizeMoney(
+              state.currentQty + movement.sign * qty,
+            );
+            if (movement.affectsRate) {
+              state.currentRate = purchaseRate;
+            }
             state.openingSnapshot = {
               qty: state.currentQty,
               rate: state.currentRate,
@@ -1933,19 +1991,25 @@ async function buildStockSummary(
             };
           } else if (inPeriod) {
             state.movement.inwardQty = normalizeMoney(
-              state.movement.inwardQty + qty,
+              state.movement.inwardQty + movement.sign * qty,
             );
             state.movement.inwardValue = normalizeMoney(
-              state.movement.inwardValue + qty * purchaseRate,
+              state.movement.inwardValue + movement.sign * inwardValue,
             );
-            state.currentQty = normalizeMoney(state.currentQty + qty);
-            state.currentRate = purchaseRate;
+            state.currentQty = normalizeMoney(
+              state.currentQty + movement.sign * qty,
+            );
+            if (movement.affectsRate) {
+              state.currentRate = purchaseRate;
+            }
           }
         } else {
           const outwardValue = normalizeMoney(qty * outwardRate);
 
           if (beforePeriod) {
-            state.currentQty = normalizeMoney(state.currentQty - qty);
+            state.currentQty = normalizeMoney(
+              state.currentQty - movement.sign * qty,
+            );
             state.openingSnapshot = {
               qty: state.currentQty,
               rate: state.currentRate,
@@ -1953,12 +2017,14 @@ async function buildStockSummary(
             };
           } else if (inPeriod) {
             state.movement.outwardQty = normalizeMoney(
-              state.movement.outwardQty + qty,
+              state.movement.outwardQty + movement.sign * qty,
             );
             state.movement.outwardValue = normalizeMoney(
-              state.movement.outwardValue + outwardValue,
+              state.movement.outwardValue + movement.sign * outwardValue,
             );
-            state.currentQty = normalizeMoney(state.currentQty - qty);
+            state.currentQty = normalizeMoney(
+              state.currentQty - movement.sign * qty,
+            );
           }
         }
 
@@ -2191,17 +2257,18 @@ async function buildInventoryDetailReport(
           history: [],
         };
 
-        const stockDirection = getInventoryLineDirection(line, voucher.voucherName);
-        if (stockDirection === 0) return;
+        const movement = getStockReportMovementDescriptor(
+          voucher.voucherName,
+          line,
+        );
+        if (!movement) return;
         const partyMovement = usePartyPerspective
           ? getPartyMovementDescriptor(voucher.voucherName)
           : null;
-        const direction = partyMovement ? partyMovement.sign : stockDirection;
+        const direction = partyMovement ? partyMovement.sign : movement.sign;
         const bucket = partyMovement
           ? partyMovement.bucket
-          : direction > 0
-          ? "inward"
-          : "outward";
+          : movement.bucket;
 
         const qty = normalizeMoney(Number(line.qty) || 0);
         const purchaseRate = normalizeMoney(
@@ -2214,11 +2281,20 @@ async function buildInventoryDetailReport(
             : saleRate || state.currentRate || purchaseRate || 0,
         );
         const value = normalizeMoney(qty * effectiveRate);
+        const signedBucketQty = normalizeMoney(movement.sign * qty);
+        const signedBucketValue = normalizeMoney(movement.sign * value);
+        const stockDeltaQty = normalizeMoney(
+          bucket === "inward" ? signedBucketQty : -signedBucketQty,
+        );
 
         if (bucket === "inward") {
           if (beforePeriod) {
-            state.currentQty = normalizeMoney(state.currentQty + direction * qty);
-            state.currentRate = effectiveRate;
+            state.currentQty = normalizeMoney(
+              state.currentQty + stockDeltaQty,
+            );
+            if (movement.affectsRate) {
+              state.currentRate = effectiveRate;
+            }
             state.openingSnapshot = {
               qty: state.currentQty,
               rate: state.currentRate,
@@ -2226,15 +2302,20 @@ async function buildInventoryDetailReport(
             };
           } else if (inPeriod) {
             state.movement.inwardQty = normalizeMoney(
-              state.movement.inwardQty + (partyMovement ? direction * qty : qty),
+              state.movement.inwardQty +
+                (partyMovement ? direction * qty : signedBucketQty),
             );
             state.movement.inwardValue = normalizeMoney(
               state.movement.inwardValue +
-                (partyMovement ? direction * value : value),
+                (partyMovement ? direction * value : signedBucketValue),
             );
             state.movement.lastInwardRate = effectiveRate;
-            state.currentQty = normalizeMoney(state.currentQty + direction * qty);
-            state.currentRate = effectiveRate;
+            state.currentQty = normalizeMoney(
+              state.currentQty + stockDeltaQty,
+            );
+            if (movement.affectsRate) {
+              state.currentRate = effectiveRate;
+            }
             state.lastInwardAt = voucher.date || state.lastInwardAt;
             state.history.push({
               voucherId: voucher._id,
@@ -2246,10 +2327,14 @@ async function buildInventoryDetailReport(
                 voucher.invoiceNumber ||
                 voucher.voucherNumber ||
                 "",
-              direction: partyMovement?.directionLabel || "IN",
-              qty: normalizeMoney(partyMovement ? direction * qty : qty),
+              direction: partyMovement?.directionLabel || movement.directionLabel,
+              qty: normalizeMoney(
+                partyMovement ? direction * qty : signedBucketQty,
+              ),
               rate: effectiveRate,
-              value: normalizeMoney(partyMovement ? direction * value : value),
+              value: normalizeMoney(
+                partyMovement ? direction * value : signedBucketValue,
+              ),
               closingQty: state.currentQty,
               closingRate: state.currentRate,
               closingValue: normalizeMoney(
@@ -2264,7 +2349,9 @@ async function buildInventoryDetailReport(
           }
         } else {
           if (beforePeriod) {
-            state.currentQty = normalizeMoney(state.currentQty + direction * qty);
+            state.currentQty = normalizeMoney(
+              state.currentQty + stockDeltaQty,
+            );
             state.openingSnapshot = {
               qty: state.currentQty,
               rate: state.currentRate,
@@ -2272,14 +2359,17 @@ async function buildInventoryDetailReport(
             };
           } else if (inPeriod) {
             state.movement.outwardQty = normalizeMoney(
-              state.movement.outwardQty + (partyMovement ? direction * qty : qty),
+              state.movement.outwardQty +
+                (partyMovement ? direction * qty : signedBucketQty),
             );
             state.movement.outwardValue = normalizeMoney(
               state.movement.outwardValue +
-                (partyMovement ? direction * value : value),
+                (partyMovement ? direction * value : signedBucketValue),
             );
             state.movement.lastOutwardRate = effectiveRate;
-            state.currentQty = normalizeMoney(state.currentQty + direction * qty);
+            state.currentQty = normalizeMoney(
+              state.currentQty + stockDeltaQty,
+            );
             state.lastOutwardAt = voucher.date || state.lastOutwardAt;
             state.history.push({
               voucherId: voucher._id,
@@ -2291,10 +2381,14 @@ async function buildInventoryDetailReport(
                 voucher.invoiceNumber ||
                 voucher.voucherNumber ||
                 "",
-              direction: partyMovement?.directionLabel || "OUT",
-              qty: normalizeMoney(partyMovement ? direction * qty : qty),
+              direction: partyMovement?.directionLabel || movement.directionLabel,
+              qty: normalizeMoney(
+                partyMovement ? direction * qty : signedBucketQty,
+              ),
               rate: effectiveRate,
-              value: normalizeMoney(partyMovement ? direction * value : value),
+              value: normalizeMoney(
+                partyMovement ? direction * value : signedBucketValue,
+              ),
               closingQty: state.currentQty,
               closingRate: state.currentRate,
               closingValue: normalizeMoney(
