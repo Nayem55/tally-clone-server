@@ -5585,7 +5585,7 @@ app.delete(
   },
 );
 
-// ---------- VOUCHERS (create / alter / delete) ----------
+// ---------- VOUCHERS (create / alter / delete) --------
 
 app.get("/companies/:companyId/customers", async (req, res) => {
   try {
