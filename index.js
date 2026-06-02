@@ -816,6 +816,17 @@ function collectDescendantGroupIds(rootIds = [], childMap = new Map()) {
   return [...visited];
 }
 
+async function getGroupBranchObjectIds(companyId, rootGroupId) {
+  const groups = await Groups.find(
+    { companyId },
+    { projection: { _id: 1, parentId: 1 } },
+  ).toArray();
+  const childMap = buildGroupChildrenMap(groups);
+  return collectDescendantGroupIds([rootGroupId], childMap)
+    .filter((value) => ObjectId.isValid(value))
+    .map((value) => new ObjectId(value));
+}
+
 function summarizeSalaryHeads(heads = []) {
   const totalEarnings = normalizeMoney(
     heads
@@ -5155,7 +5166,7 @@ app.put("/companies/:companyId/groups/:groupId", requireCompanyWriteAccess(ROLE_
   }
 });
 
-// Delete group (basic guard: no ledgers using it)
+// Delete group (guard: no dependent groups/ledgers/items or voucher usage in the branch)
 app.delete("/companies/:companyId/groups/:groupId", requireCompanyWriteAccess(ROLE_GROUPS.groupMasters), async (req, res) => {
   try {
     const companyId = new ObjectId(req.params.companyId);
@@ -5170,16 +5181,46 @@ app.delete("/companies/:companyId/groups/:groupId", requireCompanyWriteAccess(RO
         .json({ message: "System groups cannot be deleted" });
     }
 
-    const ledgerCount = await Ledgers.countDocuments({ companyId, groupId });
-    const childCount = await Groups.countDocuments({
-      companyId,
-      parentId: groupId,
-    });
+    const branchGroupIds = await getGroupBranchObjectIds(companyId, groupId);
+    const hasChildGroups = branchGroupIds.length > 1;
 
-    if (ledgerCount > 0 || childCount > 0) {
+    const [ledgerIds, itemIds] = await Promise.all([
+      Ledgers.find(
+        { companyId, groupId: { $in: branchGroupIds } },
+        { projection: { _id: 1 } },
+      ).toArray(),
+      Items.find(
+        { companyId, groupId: { $in: branchGroupIds } },
+        { projection: { _id: 1 } },
+      ).toArray(),
+    ]);
+
+    if (hasChildGroups || ledgerIds.length > 0 || itemIds.length > 0) {
       return res.status(400).json({
         message:
-          "Group is in use (has ledgers or child groups). Cannot delete.",
+          "Group is in use (has child groups, ledgers, or items). Cannot delete.",
+      });
+    }
+
+    const [ledgerVoucherUse, itemVoucherUse] = await Promise.all([
+      ledgerIds.length
+        ? Vouchers.countDocuments({
+            ...activeVoucherFilter({ companyId }),
+            "lines.ledgerId": { $in: ledgerIds.map((row) => row._id) },
+          })
+        : 0,
+      itemIds.length
+        ? Vouchers.countDocuments({
+            ...activeVoucherFilter({ companyId }),
+            "inventoryLines.itemId": { $in: itemIds.map((row) => row._id) },
+          })
+        : 0,
+    ]);
+
+    if (ledgerVoucherUse > 0 || itemVoucherUse > 0) {
+      return res.status(400).json({
+        message:
+          "Group is used in vouchers through its branch. Cannot delete.",
       });
     }
 
@@ -5492,7 +5533,7 @@ app.delete("/companies/:companyId/ledgers/:ledgerId", requireCompanyWriteAccess(
     }
 
     const used = await Vouchers.countDocuments({
-      companyId,
+      ...activeVoucherFilter({ companyId }),
       "lines.ledgerId": ledgerId,
     });
 
@@ -8208,9 +8249,13 @@ app.delete("/companies/:companyId/items/:itemId", requireCompanyWriteAccess(ROLE
   try {
     const companyId = new ObjectId(req.params.companyId);
     const itemId = new ObjectId(req.params.itemId);
+    const existingItem = await Items.findOne({ _id: itemId, companyId });
+    if (!existingItem) {
+      return res.status(404).json({ message: "Item not found" });
+    }
 
     const used = await Vouchers.countDocuments({
-      companyId,
+      ...activeVoucherFilter({ companyId }),
       "inventoryLines.itemId": itemId,
     });
 
@@ -8218,6 +8263,20 @@ app.delete("/companies/:companyId/items/:itemId", requireCompanyWriteAccess(ROLE
       return res
         .status(400)
         .json({ message: "Item is used in vouchers. Cannot delete." });
+    }
+
+    const usedInBom = await Boms.countDocuments({
+      companyId,
+      $or: [
+        { outputItemId: itemId },
+        { "components.itemId": itemId },
+      ],
+    });
+
+    if (usedInBom > 0) {
+      return res
+        .status(400)
+        .json({ message: "Item is used in BOM or production setup. Cannot delete." });
     }
 
     await Items.deleteOne({ _id: itemId, companyId });
