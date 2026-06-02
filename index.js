@@ -1460,6 +1460,39 @@ function buildProfitLossSnapshot({
 }) {
   const incomes = [];
   const expenses = [];
+  const ledgerById = new Map(
+    balances.map((ledger) => [String(ledger._id), ledger]),
+  );
+
+  function ledgerBelongsToGroup(ledger, targetGroupName) {
+    const targetKey = nameKey(targetGroupName);
+    let currentGroup =
+      groupMap.get(String(ledger?.groupId || "")) || ledger?.group || null;
+    while (currentGroup) {
+      if (nameKey(currentGroup.name || "") === targetKey) return true;
+      currentGroup = currentGroup.parentId
+        ? groupMap.get(String(currentGroup.parentId))
+        : null;
+    }
+    return false;
+  }
+
+  function sumVoucherLedgerMovement(voucher, targetGroupName, side) {
+    const cents = (voucher.lines || []).reduce((sum, line) => {
+      const ledger = ledgerById.get(String(line.ledgerId || ""));
+      if (!ledger || !ledgerBelongsToGroup(ledger, targetGroupName)) {
+        return sum;
+      }
+      const debitCents = moneyToCents(line.debit || 0);
+      const creditCents = moneyToCents(line.credit || 0);
+      const movement =
+        side === "credit"
+          ? creditCents - debitCents
+          : debitCents - creditCents;
+      return sum + Math.max(movement, 0);
+    }, 0);
+    return centsToMoney(cents);
+  }
 
   balances.forEach((ledger) => {
     const group = groupMap.get(String(ledger.groupId)) || ledger.group;
@@ -1513,18 +1546,37 @@ function buildProfitLossSnapshot({
 
   periodVouchers.forEach((voucher) => {
     const name = nameKey(voucher.voucherName || "");
-    const amount = voucherTotalAmount(voucher);
     if (name === "sales" || name === "pos voucher") {
+      const amount = sumVoucherLedgerMovement(
+        voucher,
+        "Sales Accounts",
+        "credit",
+      );
       voucherTotals.sales = normalizeMoney(voucherTotals.sales + amount);
     } else if (name === "credit note") {
+      const amount = sumVoucherLedgerMovement(
+        voucher,
+        "Sales Accounts",
+        "debit",
+      );
       voucherTotals.salesReturns = normalizeMoney(
         voucherTotals.salesReturns + amount,
       );
     } else if (name === "purchase") {
+      const amount = sumVoucherLedgerMovement(
+        voucher,
+        "Purchase Accounts",
+        "debit",
+      );
       voucherTotals.purchases = normalizeMoney(
         voucherTotals.purchases + amount,
       );
     } else if (name === "debit note") {
+      const amount = sumVoucherLedgerMovement(
+        voucher,
+        "Purchase Accounts",
+        "credit",
+      );
       voucherTotals.purchaseReturns = normalizeMoney(
         voucherTotals.purchaseReturns + amount,
       );
@@ -6476,6 +6528,22 @@ app.post("/companies/:companyId/vouchers", requireCompanyWriteAccess(ROLE_GROUPS
         additionalCharges: normalizeMoney(
           commercialMeta.additionalCharges || 0,
         ),
+        additionalExpenseLedgerId:
+          commercialMeta.additionalExpenseLedgerId &&
+          ObjectId.isValid(commercialMeta.additionalExpenseLedgerId)
+            ? new ObjectId(commercialMeta.additionalExpenseLedgerId)
+            : null,
+        additionalExpenseAmount: normalizeMoney(
+          commercialMeta.additionalExpenseAmount || 0,
+        ),
+        additionalIncomeLedgerId:
+          commercialMeta.additionalIncomeLedgerId &&
+          ObjectId.isValid(commercialMeta.additionalIncomeLedgerId)
+            ? new ObjectId(commercialMeta.additionalIncomeLedgerId)
+            : null,
+        additionalIncomeAmount: normalizeMoney(
+          commercialMeta.additionalIncomeAmount || 0,
+        ),
         totalAmount: normalizeMoney(commercialMeta.totalAmount || 0),
       };
     }
@@ -6572,6 +6640,22 @@ app.put("/companies/:companyId/vouchers/:voucherId", requireCompanyWriteAccess(R
         invoiceDiscount: normalizeMoney(commercialMeta.invoiceDiscount || 0),
         additionalCharges: normalizeMoney(
           commercialMeta.additionalCharges || 0,
+        ),
+        additionalExpenseLedgerId:
+          commercialMeta.additionalExpenseLedgerId &&
+          ObjectId.isValid(commercialMeta.additionalExpenseLedgerId)
+            ? new ObjectId(commercialMeta.additionalExpenseLedgerId)
+            : null,
+        additionalExpenseAmount: normalizeMoney(
+          commercialMeta.additionalExpenseAmount || 0,
+        ),
+        additionalIncomeLedgerId:
+          commercialMeta.additionalIncomeLedgerId &&
+          ObjectId.isValid(commercialMeta.additionalIncomeLedgerId)
+            ? new ObjectId(commercialMeta.additionalIncomeLedgerId)
+            : null,
+        additionalIncomeAmount: normalizeMoney(
+          commercialMeta.additionalIncomeAmount || 0,
         ),
         totalAmount: normalizeMoney(commercialMeta.totalAmount || 0),
       };
