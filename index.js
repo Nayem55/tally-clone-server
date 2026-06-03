@@ -730,22 +730,11 @@ function voucherTotalAmount(voucher) {
 }
 
 function getAccountingReportLines(voucher) {
-  const voucherNameKey = nameKey(voucher?.voucherName || "");
-  const shouldSwapDebitCredit =
-    voucherNameKey === "credit note" || voucherNameKey === "debit note";
-
   return (voucher?.lines || []).map((line, lineIndex) => {
-    let debit = Number(line?.debit || 0);
-    let credit = Number(line?.credit || 0);
-
-    if (shouldSwapDebitCredit) {
-      [debit, credit] = [credit, debit];
-    }
-
     return {
       ...line,
-      debit: normalizeMoney(debit),
-      credit: normalizeMoney(credit),
+      debit: normalizeMoney(line?.debit || 0),
+      credit: normalizeMoney(line?.credit || 0),
       __reportLineIndex: lineIndex,
     };
   });
@@ -1505,14 +1494,14 @@ function buildProfitLossSnapshot({
       ledgerId: ledger._id,
       ledgerName: ledger.name,
       groupName: group?.name || "",
-      amount: normalizeMoney(Math.max(amount, 0)),
+      amount: normalizeMoney(amount),
       affectsGrossProfit: Boolean(group?.affectsGrossProfit),
     };
 
     if (
       group?.nature === "INCOME" &&
       !row.affectsGrossProfit &&
-      row.amount > 0
+      row.amount !== 0
     ) {
       incomes.push(row);
     }
@@ -1523,7 +1512,7 @@ function buildProfitLossSnapshot({
     if (
       group?.nature === "EXPENSE" &&
       nameKey(group?.name || "") !== "purchase accounts" &&
-      row.amount > 0
+      row.amount !== 0
     ) {
       expenses.push(row);
     }
@@ -6528,11 +6517,29 @@ app.post("/companies/:companyId/vouchers", requireCompanyWriteAccess(ROLE_GROUPS
         additionalCharges: normalizeMoney(
           commercialMeta.additionalCharges || 0,
         ),
+        additionalAdjustments: Array.isArray(commercialMeta.additionalAdjustments)
+          ? commercialMeta.additionalAdjustments
+              .filter((row) => row?.ledgerId && ObjectId.isValid(row.ledgerId))
+              .map((row) => ({
+                ledgerId: new ObjectId(row.ledgerId),
+                ledgerName: normalizeName(row.ledgerName || ""),
+                nature: normalizeName(row.nature || ""),
+                mode: normalizeName(row.mode || "fixed"),
+                value: normalizeMoney(row.value || 0),
+                amount: normalizeMoney(row.amount || 0),
+              }))
+          : [],
         additionalExpenseLedgerId:
           commercialMeta.additionalExpenseLedgerId &&
           ObjectId.isValid(commercialMeta.additionalExpenseLedgerId)
             ? new ObjectId(commercialMeta.additionalExpenseLedgerId)
             : null,
+        additionalExpenseMode: normalizeName(
+          commercialMeta.additionalExpenseMode || "fixed",
+        ),
+        additionalExpenseValue: normalizeMoney(
+          commercialMeta.additionalExpenseValue || 0,
+        ),
         additionalExpenseAmount: normalizeMoney(
           commercialMeta.additionalExpenseAmount || 0,
         ),
@@ -6541,6 +6548,12 @@ app.post("/companies/:companyId/vouchers", requireCompanyWriteAccess(ROLE_GROUPS
           ObjectId.isValid(commercialMeta.additionalIncomeLedgerId)
             ? new ObjectId(commercialMeta.additionalIncomeLedgerId)
             : null,
+        additionalIncomeMode: normalizeName(
+          commercialMeta.additionalIncomeMode || "fixed",
+        ),
+        additionalIncomeValue: normalizeMoney(
+          commercialMeta.additionalIncomeValue || 0,
+        ),
         additionalIncomeAmount: normalizeMoney(
           commercialMeta.additionalIncomeAmount || 0,
         ),
@@ -6641,11 +6654,29 @@ app.put("/companies/:companyId/vouchers/:voucherId", requireCompanyWriteAccess(R
         additionalCharges: normalizeMoney(
           commercialMeta.additionalCharges || 0,
         ),
+        additionalAdjustments: Array.isArray(commercialMeta.additionalAdjustments)
+          ? commercialMeta.additionalAdjustments
+              .filter((row) => row?.ledgerId && ObjectId.isValid(row.ledgerId))
+              .map((row) => ({
+                ledgerId: new ObjectId(row.ledgerId),
+                ledgerName: normalizeName(row.ledgerName || ""),
+                nature: normalizeName(row.nature || ""),
+                mode: normalizeName(row.mode || "fixed"),
+                value: normalizeMoney(row.value || 0),
+                amount: normalizeMoney(row.amount || 0),
+              }))
+          : [],
         additionalExpenseLedgerId:
           commercialMeta.additionalExpenseLedgerId &&
           ObjectId.isValid(commercialMeta.additionalExpenseLedgerId)
             ? new ObjectId(commercialMeta.additionalExpenseLedgerId)
             : null,
+        additionalExpenseMode: normalizeName(
+          commercialMeta.additionalExpenseMode || "fixed",
+        ),
+        additionalExpenseValue: normalizeMoney(
+          commercialMeta.additionalExpenseValue || 0,
+        ),
         additionalExpenseAmount: normalizeMoney(
           commercialMeta.additionalExpenseAmount || 0,
         ),
@@ -6654,6 +6685,12 @@ app.put("/companies/:companyId/vouchers/:voucherId", requireCompanyWriteAccess(R
           ObjectId.isValid(commercialMeta.additionalIncomeLedgerId)
             ? new ObjectId(commercialMeta.additionalIncomeLedgerId)
             : null,
+        additionalIncomeMode: normalizeName(
+          commercialMeta.additionalIncomeMode || "fixed",
+        ),
+        additionalIncomeValue: normalizeMoney(
+          commercialMeta.additionalIncomeValue || 0,
+        ),
         additionalIncomeAmount: normalizeMoney(
           commercialMeta.additionalIncomeAmount || 0,
         ),
