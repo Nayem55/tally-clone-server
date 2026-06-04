@@ -592,14 +592,16 @@ function getInventoryLineDirection(line = {}, voucherName = "") {
 function normalizeInventoryLinePayload(line = {}) {
   const qty = Number(line.qty) || 0;
   const rate = Number(line.rate) || 0;
+  const discount = Number(line.discount) || 0;
+  const fallbackAmount = normalizeMoney(qty * rate * (1 - discount / 100));
   return {
     itemId: new ObjectId(line.itemId),
     itemName: normalizeName(line.itemName || line.productSnapshot?.name || ""),
     qty,
     rate,
-    amount: Number(line.amount) || qty * rate,
+    amount: Number(line.amount) || fallbackAmount,
     billedQty: Number(line.billedQty) || qty,
-    discount: Number(line.discount) || 0,
+    discount,
     mrpRate: Number(line.mrpRate) || rate,
     discountType: line.discountType || "fixed",
     discountValue: Number(line.discountValue) || 0,
@@ -632,6 +634,30 @@ function normalizeInventoryLinePayload(line = {}) {
         : null,
     toGodownName: normalizeName(line.toGodownName),
   };
+}
+
+function resolveInventoryLineNetRate(line = {}, fallbackRate = 0) {
+  const qty = Math.abs(Number(line.billedQty || line.qty || 0));
+  const amount = Math.abs(Number(line.amount || 0));
+  if (qty > 0 && amount > 0) {
+    return normalizeMoney(amount / qty);
+  }
+
+  const rate = Number(line.rate) || Number(fallbackRate) || 0;
+  const discountPercent = Number(line.discount || line.discountPercent || 0);
+  if (discountPercent) {
+    return normalizeMoney(rate * (1 - discountPercent / 100));
+  }
+  return normalizeMoney(rate);
+}
+
+function resolveInventoryLineNetValue(line = {}, fallbackRate = 0) {
+  const amount = Number(line.amount || 0);
+  if (amount) {
+    return normalizeMoney(Math.abs(amount));
+  }
+  const qty = Math.abs(Number(line.qty || line.billedQty || 0));
+  return normalizeMoney(qty * resolveInventoryLineNetRate(line, fallbackRate));
 }
 
 function normalizeManufacturingMeta(meta = {}) {
@@ -2076,15 +2102,17 @@ async function buildStockSummary(
       if (!movement) return;
 
       const qty = normalizeMoney(Number(line.qty) || 0);
-      const purchaseRate = normalizeMoney(
-        Number(line.rate) || state.currentRate || 0,
+      const purchaseRate = resolveInventoryLineNetRate(
+        line,
+        state.currentRate || 0,
       );
-      const outwardRate = normalizeMoney(
-        Number(line.rate) || state.currentRate || purchaseRate || 0,
+      const outwardRate = resolveInventoryLineNetRate(
+        line,
+        state.currentRate || purchaseRate || 0,
       );
 
       if (movement.bucket === "inward") {
-        const inwardValue = normalizeMoney(qty * purchaseRate);
+        const inwardValue = resolveInventoryLineNetValue(line, purchaseRate);
         if (beforePeriod) {
           state.currentQty = normalizeMoney(
             state.currentQty + movement.sign * qty,
@@ -2112,7 +2140,7 @@ async function buildStockSummary(
           }
         }
       } else {
-        const outwardValue = normalizeMoney(qty * outwardRate);
+        const outwardValue = resolveInventoryLineNetValue(line, outwardRate);
 
         if (beforePeriod) {
           state.currentQty = normalizeMoney(
@@ -2381,16 +2409,17 @@ async function buildInventoryDetailReport(
       const bucket = partyMovement ? partyMovement.bucket : movement.bucket;
 
       const qty = normalizeMoney(Number(line.qty) || 0);
-      const purchaseRate = normalizeMoney(
-        Number(line.rate) || state.currentRate || 0,
+      const purchaseRate = resolveInventoryLineNetRate(
+        line,
+        state.currentRate || 0,
       );
-      const saleRate = normalizeMoney(Number(line.rate) || 0);
+      const saleRate = resolveInventoryLineNetRate(line, 0);
       const effectiveRate = normalizeMoney(
         bucket === "inward"
           ? purchaseRate
           : saleRate || state.currentRate || purchaseRate || 0,
       );
-      const value = normalizeMoney(qty * effectiveRate);
+      const value = resolveInventoryLineNetValue(line, effectiveRate);
       const signedBucketQty = normalizeMoney(movement.sign * qty);
       const signedBucketValue = normalizeMoney(movement.sign * value);
       const stockDeltaQty = normalizeMoney(
@@ -3052,8 +3081,8 @@ async function buildInventoryMovementDimensionReport(
         : "outward";
 
       const qty = normalizeMoney(Number(line.qty) || 0);
-      const rate = normalizeMoney(Number(line.rate) || 0);
-      const value = normalizeMoney(qty * rate);
+      const rate = resolveInventoryLineNetRate(line, 0);
+      const value = resolveInventoryLineNetValue(line, rate);
 
       if (beforePeriod) {
         state.metrics.openingQty = normalizeMoney(
@@ -3238,8 +3267,8 @@ async function buildSalesPersonDrillReport(
         }
 
         const qty = normalizeMoney(Number(line.qty || 0));
-        const rate = normalizeMoney(Number(line.rate || 0));
-        const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
+        const rate = resolveInventoryLineNetRate(line, 0);
+        const value = resolveInventoryLineNetValue(line, rate);
         totalQty = normalizeMoney(totalQty + qty);
         totalValue = normalizeMoney(totalValue + value);
 
@@ -3324,8 +3353,8 @@ async function buildSalesPersonDrillReport(
       if (requestedItemId && String(line.itemId) !== requestedItemId) return;
 
       const qty = normalizeMoney(Number(line.qty || 0));
-      const rate = normalizeMoney(Number(line.rate || 0));
-      const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
+      const rate = resolveInventoryLineNetRate(line, 0);
+      const value = resolveInventoryLineNetValue(line, rate);
 
       totals.salesQty = normalizeMoney(totals.salesQty + qty);
       totals.salesValue = normalizeMoney(totals.salesValue + value);
@@ -3526,8 +3555,8 @@ async function buildPartyMovementDetailReport(
       if (!partyMovement) return;
 
       const qty = normalizeMoney(Number(line.qty || 0));
-      const rate = normalizeMoney(Number(line.rate || 0));
-      const value = normalizeMoney(Number(line.amount || 0) || qty * rate);
+      const rate = resolveInventoryLineNetRate(line, 0);
+      const value = resolveInventoryLineNetValue(line, rate);
       const voucherTime = getVoucherTime(voucher?.date);
       const hasVoucherTime = voucherTime !== 0;
       const beforePeriod =
@@ -8125,7 +8154,7 @@ app.get("/companies/:companyId/items", async (req, res) => {
       lines.forEach((line) => {
         const itemId = String(line.itemId || "");
         if (!itemId) return;
-        const rate = Number(line.rate || 0);
+        const rate = resolveInventoryLineNetRate(line, 0);
         if (!Number.isFinite(rate)) return;
         latestPurchaseByItem.set(itemId, rate);
       });
