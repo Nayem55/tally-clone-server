@@ -12,9 +12,11 @@ const app = express();
 const MONGO_URI =
   process.env.MONGO_URI || "mongodb://192.168.0.59:27017/Demo-pos";
 const PORT = Number(process.env.PORT) || 15001;
-const RATE_LIMIT_AUTH_WINDOW_MS = Number(process.env.RATE_LIMIT_AUTH_WINDOW_MS) || 5 * 60 * 1000;
+const RATE_LIMIT_AUTH_WINDOW_MS =
+  Number(process.env.RATE_LIMIT_AUTH_WINDOW_MS) || 5 * 60 * 1000;
 const RATE_LIMIT_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH_MAX) || 20;
-const RATE_LIMIT_WRITE_WINDOW_MS = Number(process.env.RATE_LIMIT_WRITE_WINDOW_MS) || 60 * 1000;
+const RATE_LIMIT_WRITE_WINDOW_MS =
+  Number(process.env.RATE_LIMIT_WRITE_WINDOW_MS) || 60 * 1000;
 const RATE_LIMIT_WRITE_MAX = Number(process.env.RATE_LIMIT_WRITE_MAX) || 120;
 const EMPLOYEE_SESSION_TTL_MS =
   Number(process.env.EMPLOYEE_SESSION_TTL_MS) || 12 * 60 * 60 * 1000;
@@ -59,7 +61,10 @@ app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=()",
+  );
   next();
 });
 
@@ -159,8 +164,8 @@ function sumMoney(...values) {
 function subtractMoney(base, ...values) {
   return centsToMoney(
     values.reduce(
-    (sum, value) => sum - moneyToCents(value),
-    moneyToCents(base),
+      (sum, value) => sum - moneyToCents(value),
+      moneyToCents(base),
     ),
   );
 }
@@ -197,7 +202,11 @@ function applyRateLimit({ key, windowMs, max }) {
   if (!current || current.resetAt <= now) {
     const nextBucket = { count: 1, resetAt: now + windowMs };
     requestBuckets.set(key, nextBucket);
-    return { allowed: true, remaining: Math.max(max - 1, 0), resetAt: nextBucket.resetAt };
+    return {
+      allowed: true,
+      remaining: Math.max(max - 1, 0),
+      resetAt: nextBucket.resetAt,
+    };
   }
 
   current.count += 1;
@@ -215,7 +224,10 @@ function rateLimit({ scope, windowMs, max, message }) {
     const result = applyRateLimit({ key, windowMs, max });
     res.setHeader("X-RateLimit-Limit", String(max));
     res.setHeader("X-RateLimit-Remaining", String(result.remaining));
-    res.setHeader("X-RateLimit-Reset", String(Math.ceil(result.resetAt / 1000)));
+    res.setHeader(
+      "X-RateLimit-Reset",
+      String(Math.ceil(result.resetAt / 1000)),
+    );
 
     if (!result.allowed) {
       const retryAfterSeconds = Math.max(
@@ -224,7 +236,8 @@ function rateLimit({ scope, windowMs, max, message }) {
       );
       res.setHeader("Retry-After", String(retryAfterSeconds));
       return res.status(429).json({
-        message: message || "Too many requests. Please wait a bit and try again.",
+        message:
+          message || "Too many requests. Please wait a bit and try again.",
       });
     }
 
@@ -249,7 +262,7 @@ function verifyCompanyPassword(password = "", auth = {}) {
     auth.salt,
     Number(auth.iterations || 120000),
     64,
-    auth.digest || "sha512"
+    auth.digest || "sha512",
   );
   const expected = Buffer.from(auth.hash, "hex");
   if (derived.length !== expected.length) return false;
@@ -265,10 +278,9 @@ function toBase64Url(value = "") {
 }
 
 function fromBase64Url(value = "") {
-  const normalized = String(value)
-    .replace(/-/g, "+")
-    .replace(/_/g, "/");
-  const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
+  const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");
+  const padding =
+    normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
   return Buffer.from(`${normalized}${padding}`, "base64").toString("utf8");
 }
 
@@ -314,7 +326,11 @@ function verifyEmployeeSessionToken(token = "") {
       return null;
     }
 
-    if (!payload?.sub || !payload?.companyId || Number(payload.exp || 0) < Date.now()) {
+    if (
+      !payload?.sub ||
+      !payload?.companyId ||
+      Number(payload.exp || 0) < Date.now()
+    ) {
       return null;
     }
 
@@ -478,11 +494,7 @@ function getPartyMovementDescriptor(voucherName = "") {
   if (key === "debit note") {
     return { bucket: "inward", sign: -1, directionLabel: "Purchase Return" };
   }
-  if (
-    key === "sales" ||
-    key === "pos voucher" ||
-    key === "delivery note"
-  ) {
+  if (key === "sales" || key === "pos voucher" || key === "delivery note") {
     return { bucket: "outward", sign: 1, directionLabel: "Sale" };
   }
   if (key === "credit note") {
@@ -1105,7 +1117,9 @@ function buildEmployeeSessionUser(employee = null, company = null) {
 }
 
 function normalizeRole(role = "") {
-  return String(role || "").trim().toLowerCase();
+  return String(role || "")
+    .trim()
+    .toLowerCase();
 }
 
 const ROLE_GROUPS = {
@@ -1215,7 +1229,9 @@ function requireCompanyWriteAccess(allowedRoles = []) {
       return next();
     } catch (error) {
       console.error("Error enforcing employee write access:", error);
-      return res.status(500).json({ message: "Unable to verify access rights." });
+      return res
+        .status(500)
+        .json({ message: "Unable to verify access rights." });
     }
   };
 }
@@ -1275,12 +1291,17 @@ function summarizeLedgerBalances(ledgers, vouchers, fromDate, toDate) {
         const current = openingMap.get(ledgerKey) || 0;
         openingMap.set(
           ledgerKey,
-          current + moneyToCents(line.debit || 0) - moneyToCents(line.credit || 0),
+          current +
+            moneyToCents(line.debit || 0) -
+            moneyToCents(line.credit || 0),
         );
       }
 
       if (inPeriod) {
-        const current = periodMap.get(ledgerKey) || { debitCents: 0, creditCents: 0 };
+        const current = periodMap.get(ledgerKey) || {
+          debitCents: 0,
+          creditCents: 0,
+        };
         current.debitCents += moneyToCents(line.debit || 0);
         current.creditCents += moneyToCents(line.credit || 0);
         periodMap.set(ledgerKey, current);
@@ -1466,7 +1487,7 @@ function buildProfitLossSnapshot({
     return false;
   }
 
-  function sumVoucherLedgerMovement(voucher, targetGroupName, side) {
+  function sumVoucherLedgerMovement(voucher, targetGroupName, side, targetMap = null) {
     const cents = (voucher.lines || []).reduce((sum, line) => {
       const ledger = ledgerById.get(String(line.ledgerId || ""));
       if (!ledger || !ledgerBelongsToGroup(ledger, targetGroupName)) {
@@ -1475,12 +1496,31 @@ function buildProfitLossSnapshot({
       const debitCents = moneyToCents(line.debit || 0);
       const creditCents = moneyToCents(line.credit || 0);
       const movement =
-        side === "credit"
-          ? creditCents - debitCents
-          : debitCents - creditCents;
-      return sum + Math.max(movement, 0);
+        side === "credit" ? creditCents - debitCents : debitCents - creditCents;
+      const positiveMovement = Math.max(movement, 0);
+      if (targetMap && positiveMovement > 0) {
+        const ledgerKey = String(ledger._id || line.ledgerId || "");
+        const current = targetMap.get(ledgerKey) || {
+          ledgerId: ledger._id,
+          ledgerName: ledger.name,
+          amountCents: 0,
+        };
+        current.amountCents += positiveMovement;
+        targetMap.set(ledgerKey, current);
+      }
+      return sum + positiveMovement;
     }, 0);
     return centsToMoney(cents);
+  }
+
+  function mapToTradingRows(map) {
+    return [...map.values()]
+      .map((row) => ({
+        ledgerId: row.ledgerId,
+        ledgerName: row.ledgerName,
+        amount: centsToMoney(row.amountCents),
+      }))
+      .sort((left, right) => String(left.ledgerName || "").localeCompare(String(right.ledgerName || "")));
   }
 
   balances.forEach((ledger) => {
@@ -1532,6 +1572,12 @@ function buildProfitLossSnapshot({
     purchases: 0,
     purchaseReturns: 0,
   };
+  const tradingLedgers = {
+    sales: new Map(),
+    salesReturns: new Map(),
+    purchases: new Map(),
+    purchaseReturns: new Map(),
+  };
 
   periodVouchers.forEach((voucher) => {
     const name = nameKey(voucher.voucherName || "");
@@ -1540,6 +1586,7 @@ function buildProfitLossSnapshot({
         voucher,
         "Sales Accounts",
         "credit",
+        tradingLedgers.sales,
       );
       voucherTotals.sales = normalizeMoney(voucherTotals.sales + amount);
     } else if (name === "credit note") {
@@ -1547,6 +1594,7 @@ function buildProfitLossSnapshot({
         voucher,
         "Sales Accounts",
         "debit",
+        tradingLedgers.salesReturns,
       );
       voucherTotals.salesReturns = normalizeMoney(
         voucherTotals.salesReturns + amount,
@@ -1556,6 +1604,7 @@ function buildProfitLossSnapshot({
         voucher,
         "Purchase Accounts",
         "debit",
+        tradingLedgers.purchases,
       );
       voucherTotals.purchases = normalizeMoney(
         voucherTotals.purchases + amount,
@@ -1565,6 +1614,7 @@ function buildProfitLossSnapshot({
         voucher,
         "Purchase Accounts",
         "credit",
+        tradingLedgers.purchaseReturns,
       );
       voucherTotals.purchaseReturns = normalizeMoney(
         voucherTotals.purchaseReturns + amount,
@@ -1602,9 +1652,7 @@ function buildProfitLossSnapshot({
     (sum, row) => normalizeMoney(sum + row.amount),
     0,
   );
-  const netProfit = normalizeMoney(
-    grossProfit + indirectIncome - totalExpense,
-  );
+  const netProfit = normalizeMoney(grossProfit + indirectIncome - totalExpense);
   const profitMargin = netSales
     ? normalizeMoney((netProfit / netSales) * 100)
     : 0;
@@ -1620,6 +1668,10 @@ function buildProfitLossSnapshot({
       purchases: voucherTotals.purchases,
       purchaseReturns: voucherTotals.purchaseReturns,
       netPurchases,
+      salesLedgers: mapToTradingRows(tradingLedgers.sales),
+      salesReturnLedgers: mapToTradingRows(tradingLedgers.salesReturns),
+      purchaseLedgers: mapToTradingRows(tradingLedgers.purchases),
+      purchaseReturnLedgers: mapToTradingRows(tradingLedgers.purchaseReturns),
       closingStock,
       costOfGoodsSold,
       grossProfit,
@@ -1686,7 +1738,9 @@ function summarizeDashboardBalances(balances) {
       if (row.group?.affectsGrossProfit) {
         summary.directIncome = normalizeMoney(summary.directIncome + amount);
       } else {
-        summary.indirectIncome = normalizeMoney(summary.indirectIncome + amount);
+        summary.indirectIncome = normalizeMoney(
+          summary.indirectIncome + amount,
+        );
       }
     }
     if (row.group?.nature === "EXPENSE") {
@@ -1945,11 +1999,13 @@ async function buildStockSummary(
   const [groups, allItems, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
-    Vouchers.find(activeVoucherFilter({
-      companyId,
-      ...(toDate ? { date: { $lte: toDate } } : {}),
-      inventoryLines: { $exists: true, $ne: [] },
-    })).toArray(),
+    Vouchers.find(
+      activeVoucherFilter({
+        companyId,
+        ...(toDate ? { date: { $lte: toDate } } : {}),
+        inventoryLines: { $exists: true, $ne: [] },
+      }),
+    ).toArray(),
   ]);
 
   const items = allItems.filter((item) => itemMatchesRoleFilter(item, options));
@@ -1983,106 +2039,106 @@ async function buildStockSummary(
   );
 
   sortVouchersByDateAscending(vouchers).forEach((voucher) => {
-      if (!Array.isArray(voucher.inventoryLines)) {
-        return;
-      }
+    if (!Array.isArray(voucher.inventoryLines)) {
+      return;
+    }
 
-      const voucherTime = getVoucherTime(voucher?.date);
-      const hasVoucherTime = voucherTime !== 0;
-      const beforePeriod =
-        fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
-      const inPeriod =
-        fromTime === null ||
-        (hasVoucherTime &&
-          voucherTime >= fromTime &&
-          (toTime === null || voucherTime <= toTime));
+    const voucherTime = getVoucherTime(voucher?.date);
+    const hasVoucherTime = voucherTime !== 0;
+    const beforePeriod =
+      fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
+    const inPeriod =
+      fromTime === null ||
+      (hasVoucherTime &&
+        voucherTime >= fromTime &&
+        (toTime === null || voucherTime <= toTime));
 
-      voucher.inventoryLines.forEach((line) => {
-        if (!line?.itemId) return;
-        const key = String(line.itemId);
-        if (!itemIdSet.has(key)) return;
-        const state = itemStateMap.get(key) || {
-          openingSnapshot: { qty: 0, rate: 0, value: 0 },
-          currentQty: 0,
-          currentRate: 0,
-          movement: {
-            inwardQty: 0,
-            inwardValue: 0,
-            outwardQty: 0,
-            outwardValue: 0,
-          },
-        };
+    voucher.inventoryLines.forEach((line) => {
+      if (!line?.itemId) return;
+      const key = String(line.itemId);
+      if (!itemIdSet.has(key)) return;
+      const state = itemStateMap.get(key) || {
+        openingSnapshot: { qty: 0, rate: 0, value: 0 },
+        currentQty: 0,
+        currentRate: 0,
+        movement: {
+          inwardQty: 0,
+          inwardValue: 0,
+          outwardQty: 0,
+          outwardValue: 0,
+        },
+      };
 
-        const movement = getStockReportMovementDescriptor(
-          voucher.voucherName,
-          line,
-        );
-        if (!movement) return;
+      const movement = getStockReportMovementDescriptor(
+        voucher.voucherName,
+        line,
+      );
+      if (!movement) return;
 
-        const qty = normalizeMoney(Number(line.qty) || 0);
-        const purchaseRate = normalizeMoney(
-          Number(line.rate) || state.currentRate || 0,
-        );
-        const outwardRate = normalizeMoney(
-          Number(line.rate) || state.currentRate || purchaseRate || 0,
-        );
+      const qty = normalizeMoney(Number(line.qty) || 0);
+      const purchaseRate = normalizeMoney(
+        Number(line.rate) || state.currentRate || 0,
+      );
+      const outwardRate = normalizeMoney(
+        Number(line.rate) || state.currentRate || purchaseRate || 0,
+      );
 
-        if (movement.bucket === "inward") {
-          const inwardValue = normalizeMoney(qty * purchaseRate);
-          if (beforePeriod) {
-            state.currentQty = normalizeMoney(
-              state.currentQty + movement.sign * qty,
-            );
-            if (movement.affectsRate) {
-              state.currentRate = purchaseRate;
-            }
-            state.openingSnapshot = {
-              qty: state.currentQty,
-              rate: state.currentRate,
-              value: normalizeMoney(state.currentQty * state.currentRate),
-            };
-          } else if (inPeriod) {
-            state.movement.inwardQty = normalizeMoney(
-              state.movement.inwardQty + movement.sign * qty,
-            );
-            state.movement.inwardValue = normalizeMoney(
-              state.movement.inwardValue + movement.sign * inwardValue,
-            );
-            state.currentQty = normalizeMoney(
-              state.currentQty + movement.sign * qty,
-            );
-            if (movement.affectsRate) {
-              state.currentRate = purchaseRate;
-            }
+      if (movement.bucket === "inward") {
+        const inwardValue = normalizeMoney(qty * purchaseRate);
+        if (beforePeriod) {
+          state.currentQty = normalizeMoney(
+            state.currentQty + movement.sign * qty,
+          );
+          if (movement.affectsRate) {
+            state.currentRate = purchaseRate;
           }
-        } else {
-          const outwardValue = normalizeMoney(qty * outwardRate);
-
-          if (beforePeriod) {
-            state.currentQty = normalizeMoney(
-              state.currentQty - movement.sign * qty,
-            );
-            state.openingSnapshot = {
-              qty: state.currentQty,
-              rate: state.currentRate,
-              value: normalizeMoney(state.currentQty * state.currentRate),
-            };
-          } else if (inPeriod) {
-            state.movement.outwardQty = normalizeMoney(
-              state.movement.outwardQty + movement.sign * qty,
-            );
-            state.movement.outwardValue = normalizeMoney(
-              state.movement.outwardValue + movement.sign * outwardValue,
-            );
-            state.currentQty = normalizeMoney(
-              state.currentQty - movement.sign * qty,
-            );
+          state.openingSnapshot = {
+            qty: state.currentQty,
+            rate: state.currentRate,
+            value: normalizeMoney(state.currentQty * state.currentRate),
+          };
+        } else if (inPeriod) {
+          state.movement.inwardQty = normalizeMoney(
+            state.movement.inwardQty + movement.sign * qty,
+          );
+          state.movement.inwardValue = normalizeMoney(
+            state.movement.inwardValue + movement.sign * inwardValue,
+          );
+          state.currentQty = normalizeMoney(
+            state.currentQty + movement.sign * qty,
+          );
+          if (movement.affectsRate) {
+            state.currentRate = purchaseRate;
           }
         }
+      } else {
+        const outwardValue = normalizeMoney(qty * outwardRate);
 
-        itemStateMap.set(key, state);
-      });
+        if (beforePeriod) {
+          state.currentQty = normalizeMoney(
+            state.currentQty - movement.sign * qty,
+          );
+          state.openingSnapshot = {
+            qty: state.currentQty,
+            rate: state.currentRate,
+            value: normalizeMoney(state.currentQty * state.currentRate),
+          };
+        } else if (inPeriod) {
+          state.movement.outwardQty = normalizeMoney(
+            state.movement.outwardQty + movement.sign * qty,
+          );
+          state.movement.outwardValue = normalizeMoney(
+            state.movement.outwardValue + movement.sign * outwardValue,
+          );
+          state.currentQty = normalizeMoney(
+            state.currentQty - movement.sign * qty,
+          );
+        }
+      }
+
+      itemStateMap.set(key, state);
     });
+  });
 
   const rows = items
     .map((item) => {
@@ -2168,11 +2224,13 @@ async function buildInventoryDetailReport(
     Groups.find({ companyId }).toArray(),
     Ledgers.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
-    Vouchers.find(activeVoucherFilter({
-      companyId,
-      ...(toDate ? { date: { $lte: toDate } } : {}),
-      inventoryLines: { $exists: true, $ne: [] },
-    })).toArray(),
+    Vouchers.find(
+      activeVoucherFilter({
+        companyId,
+        ...(toDate ? { date: { $lte: toDate } } : {}),
+        inventoryLines: { $exists: true, $ne: [] },
+      }),
+    ).toArray(),
   ]);
 
   const requestedGroupId = options.groupId ? String(options.groupId) : "";
@@ -2206,7 +2264,9 @@ async function buildInventoryDetailReport(
   });
   const itemIdSet = new Set(items.map((item) => String(item._id)));
   const groupsById = new Map(groups.map((group) => [String(group._id), group]));
-  const ledgerById = new Map(ledgers.map((ledger) => [String(ledger._id), ledger]));
+  const ledgerById = new Map(
+    ledgers.map((ledger) => [String(ledger._id), ledger]),
+  );
   const fromTime = fromDate ? fromDate.getTime() : null;
   const toTime = toDate ? toDate.getTime() : null;
 
@@ -2254,210 +2314,196 @@ async function buildInventoryDetailReport(
   );
 
   sortVouchersByDateAscending(vouchers).forEach((voucher) => {
-      const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
-      const partyLedgerId = String(partyLedger?._id || "");
-      const partyGroupId = String(partyLedger?.groupId || "");
-      const partyGroupName =
-        groupsById.get(partyGroupId)?.name ||
-        normalizeName(voucher.customerSnapshot?.name || "") ||
-        "";
+    const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
+    const partyLedgerId = String(partyLedger?._id || "");
+    const partyGroupId = String(partyLedger?.groupId || "");
+    const partyGroupName =
+      groupsById.get(partyGroupId)?.name ||
+      normalizeName(voucher.customerSnapshot?.name || "") ||
+      "";
 
-      if (requestedSalesPersonId) {
-        if (!isSalesPersonTrackedVoucherName(voucher.voucherName)) return;
-        if (!voucherMatchesSalesPerson(voucher, requestedSalesPersonId)) return;
-      }
-      if (requestedPartyLedgerId && partyLedgerId !== requestedPartyLedgerId) {
-        return;
-      }
-      if (
-        requestedPartyGroupId &&
-        !isDescendantGroup(partyGroupId, requestedPartyGroupId)
-      ) {
-        return;
-      }
-      if (!Array.isArray(voucher.inventoryLines)) return;
+    if (requestedSalesPersonId) {
+      if (!isSalesPersonTrackedVoucherName(voucher.voucherName)) return;
+      if (!voucherMatchesSalesPerson(voucher, requestedSalesPersonId)) return;
+    }
+    if (requestedPartyLedgerId && partyLedgerId !== requestedPartyLedgerId) {
+      return;
+    }
+    if (
+      requestedPartyGroupId &&
+      !isDescendantGroup(partyGroupId, requestedPartyGroupId)
+    ) {
+      return;
+    }
+    if (!Array.isArray(voucher.inventoryLines)) return;
 
-      const voucherTime = getVoucherTime(voucher?.date);
-      const hasVoucherTime = voucherTime !== 0;
-      const beforePeriod =
-        fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
-      const inPeriod =
-        fromTime === null ||
-        (hasVoucherTime &&
-          voucherTime >= fromTime &&
-          (toTime === null || voucherTime <= toTime));
+    const voucherTime = getVoucherTime(voucher?.date);
+    const hasVoucherTime = voucherTime !== 0;
+    const beforePeriod =
+      fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
+    const inPeriod =
+      fromTime === null ||
+      (hasVoucherTime &&
+        voucherTime >= fromTime &&
+        (toTime === null || voucherTime <= toTime));
 
-      voucher.inventoryLines.forEach((line) => {
-        if (!line?.itemId) return;
-        const key = String(line.itemId);
-        if (!itemIdSet.has(key)) return;
-        const state = itemStateMap.get(key) || {
-          item: {},
-          openingSnapshot: { qty: 0, rate: 0, value: 0 },
-          currentQty: 0,
-          currentRate: 0,
-          movement: {
-            inwardQty: 0,
-            inwardValue: 0,
-            outwardQty: 0,
-            outwardValue: 0,
-            lastInwardRate: 0,
-            lastOutwardRate: 0,
-          },
-          lastInwardAt: null,
-          lastOutwardAt: null,
-          history: [],
-        };
+    voucher.inventoryLines.forEach((line) => {
+      if (!line?.itemId) return;
+      const key = String(line.itemId);
+      if (!itemIdSet.has(key)) return;
+      const state = itemStateMap.get(key) || {
+        item: {},
+        openingSnapshot: { qty: 0, rate: 0, value: 0 },
+        currentQty: 0,
+        currentRate: 0,
+        movement: {
+          inwardQty: 0,
+          inwardValue: 0,
+          outwardQty: 0,
+          outwardValue: 0,
+          lastInwardRate: 0,
+          lastOutwardRate: 0,
+        },
+        lastInwardAt: null,
+        lastOutwardAt: null,
+        history: [],
+      };
 
-        const movement = getStockReportMovementDescriptor(
-          voucher.voucherName,
-          line,
-        );
-        if (!movement) return;
-        const partyMovement = usePartyPerspective
-          ? getPartyMovementDescriptor(voucher.voucherName)
-          : null;
-        const direction = partyMovement ? partyMovement.sign : movement.sign;
-        const bucket = partyMovement
-          ? partyMovement.bucket
-          : movement.bucket;
+      const movement = getStockReportMovementDescriptor(
+        voucher.voucherName,
+        line,
+      );
+      if (!movement) return;
+      const partyMovement = usePartyPerspective
+        ? getPartyMovementDescriptor(voucher.voucherName)
+        : null;
+      const direction = partyMovement ? partyMovement.sign : movement.sign;
+      const bucket = partyMovement ? partyMovement.bucket : movement.bucket;
 
-        const qty = normalizeMoney(Number(line.qty) || 0);
-        const purchaseRate = normalizeMoney(
-          Number(line.rate) || state.currentRate || 0,
-        );
-        const saleRate = normalizeMoney(Number(line.rate) || 0);
-        const effectiveRate = normalizeMoney(
-          bucket === "inward"
-            ? purchaseRate
-            : saleRate || state.currentRate || purchaseRate || 0,
-        );
-        const value = normalizeMoney(qty * effectiveRate);
-        const signedBucketQty = normalizeMoney(movement.sign * qty);
-        const signedBucketValue = normalizeMoney(movement.sign * value);
-        const stockDeltaQty = normalizeMoney(
-          bucket === "inward" ? signedBucketQty : -signedBucketQty,
-        );
+      const qty = normalizeMoney(Number(line.qty) || 0);
+      const purchaseRate = normalizeMoney(
+        Number(line.rate) || state.currentRate || 0,
+      );
+      const saleRate = normalizeMoney(Number(line.rate) || 0);
+      const effectiveRate = normalizeMoney(
+        bucket === "inward"
+          ? purchaseRate
+          : saleRate || state.currentRate || purchaseRate || 0,
+      );
+      const value = normalizeMoney(qty * effectiveRate);
+      const signedBucketQty = normalizeMoney(movement.sign * qty);
+      const signedBucketValue = normalizeMoney(movement.sign * value);
+      const stockDeltaQty = normalizeMoney(
+        bucket === "inward" ? signedBucketQty : -signedBucketQty,
+      );
 
-        if (bucket === "inward") {
-          if (beforePeriod) {
-            state.currentQty = normalizeMoney(
-              state.currentQty + stockDeltaQty,
-            );
-            if (movement.affectsRate) {
-              state.currentRate = effectiveRate;
-            }
-            state.openingSnapshot = {
-              qty: state.currentQty,
-              rate: state.currentRate,
-              value: normalizeMoney(state.currentQty * state.currentRate),
-            };
-          } else if (inPeriod) {
-            state.movement.inwardQty = normalizeMoney(
-              state.movement.inwardQty +
-                (partyMovement ? direction * qty : signedBucketQty),
-            );
-            state.movement.inwardValue = normalizeMoney(
-              state.movement.inwardValue +
-                (partyMovement ? direction * value : signedBucketValue),
-            );
-            state.movement.lastInwardRate = effectiveRate;
-            state.currentQty = normalizeMoney(
-              state.currentQty + stockDeltaQty,
-            );
-            if (movement.affectsRate) {
-              state.currentRate = effectiveRate;
-            }
-            state.lastInwardAt = voucher.date || state.lastInwardAt;
-            state.history.push({
-              voucherId: voucher._id,
-              date: voucher.date || null,
-              dateLabel: formatDateLabel(voucher.date),
-              voucherName: voucher.voucherName || "Voucher",
-              number:
-                voucher.number ||
-                voucher.invoiceNumber ||
-                voucher.voucherNumber ||
-                "",
-              direction: partyMovement?.directionLabel || movement.directionLabel,
-              qty: normalizeMoney(
-                partyMovement ? direction * qty : signedBucketQty,
-              ),
-              rate: effectiveRate,
-              value: normalizeMoney(
-                partyMovement ? direction * value : signedBucketValue,
-              ),
-              closingQty: state.currentQty,
-              closingRate: state.currentRate,
-              closingValue: normalizeMoney(
-                state.currentQty * state.currentRate,
-              ),
-              itemName: normalizeName(line.itemName || state.item?.name || ""),
-              partyLedgerId,
-              partyLedgerName: normalizeName(partyLedger?.name || ""),
-              partyGroupId,
-              partyGroupName: normalizeName(partyGroupName),
-            });
+      if (bucket === "inward") {
+        if (beforePeriod) {
+          state.currentQty = normalizeMoney(state.currentQty + stockDeltaQty);
+          if (movement.affectsRate) {
+            state.currentRate = effectiveRate;
           }
-        } else {
-          if (beforePeriod) {
-            state.currentQty = normalizeMoney(
-              state.currentQty + stockDeltaQty,
-            );
-            state.openingSnapshot = {
-              qty: state.currentQty,
-              rate: state.currentRate,
-              value: normalizeMoney(state.currentQty * state.currentRate),
-            };
-          } else if (inPeriod) {
-            state.movement.outwardQty = normalizeMoney(
-              state.movement.outwardQty +
-                (partyMovement ? direction * qty : signedBucketQty),
-            );
-            state.movement.outwardValue = normalizeMoney(
-              state.movement.outwardValue +
-                (partyMovement ? direction * value : signedBucketValue),
-            );
-            state.movement.lastOutwardRate = effectiveRate;
-            state.currentQty = normalizeMoney(
-              state.currentQty + stockDeltaQty,
-            );
-            state.lastOutwardAt = voucher.date || state.lastOutwardAt;
-            state.history.push({
-              voucherId: voucher._id,
-              date: voucher.date || null,
-              dateLabel: formatDateLabel(voucher.date),
-              voucherName: voucher.voucherName || "Voucher",
-              number:
-                voucher.number ||
-                voucher.invoiceNumber ||
-                voucher.voucherNumber ||
-                "",
-              direction: partyMovement?.directionLabel || movement.directionLabel,
-              qty: normalizeMoney(
-                partyMovement ? direction * qty : signedBucketQty,
-              ),
-              rate: effectiveRate,
-              value: normalizeMoney(
-                partyMovement ? direction * value : signedBucketValue,
-              ),
-              closingQty: state.currentQty,
-              closingRate: state.currentRate,
-              closingValue: normalizeMoney(
-                state.currentQty * state.currentRate,
-              ),
-              itemName: normalizeName(line.itemName || state.item?.name || ""),
-              partyLedgerId,
-              partyLedgerName: normalizeName(partyLedger?.name || ""),
-              partyGroupId,
-              partyGroupName: normalizeName(partyGroupName),
-            });
+          state.openingSnapshot = {
+            qty: state.currentQty,
+            rate: state.currentRate,
+            value: normalizeMoney(state.currentQty * state.currentRate),
+          };
+        } else if (inPeriod) {
+          state.movement.inwardQty = normalizeMoney(
+            state.movement.inwardQty +
+              (partyMovement ? direction * qty : signedBucketQty),
+          );
+          state.movement.inwardValue = normalizeMoney(
+            state.movement.inwardValue +
+              (partyMovement ? direction * value : signedBucketValue),
+          );
+          state.movement.lastInwardRate = effectiveRate;
+          state.currentQty = normalizeMoney(state.currentQty + stockDeltaQty);
+          if (movement.affectsRate) {
+            state.currentRate = effectiveRate;
           }
+          state.lastInwardAt = voucher.date || state.lastInwardAt;
+          state.history.push({
+            voucherId: voucher._id,
+            date: voucher.date || null,
+            dateLabel: formatDateLabel(voucher.date),
+            voucherName: voucher.voucherName || "Voucher",
+            number:
+              voucher.number ||
+              voucher.invoiceNumber ||
+              voucher.voucherNumber ||
+              "",
+            direction: partyMovement?.directionLabel || movement.directionLabel,
+            qty: normalizeMoney(
+              partyMovement ? direction * qty : signedBucketQty,
+            ),
+            rate: effectiveRate,
+            value: normalizeMoney(
+              partyMovement ? direction * value : signedBucketValue,
+            ),
+            closingQty: state.currentQty,
+            closingRate: state.currentRate,
+            closingValue: normalizeMoney(state.currentQty * state.currentRate),
+            itemName: normalizeName(line.itemName || state.item?.name || ""),
+            partyLedgerId,
+            partyLedgerName: normalizeName(partyLedger?.name || ""),
+            partyGroupId,
+            partyGroupName: normalizeName(partyGroupName),
+          });
         }
+      } else {
+        if (beforePeriod) {
+          state.currentQty = normalizeMoney(state.currentQty + stockDeltaQty);
+          state.openingSnapshot = {
+            qty: state.currentQty,
+            rate: state.currentRate,
+            value: normalizeMoney(state.currentQty * state.currentRate),
+          };
+        } else if (inPeriod) {
+          state.movement.outwardQty = normalizeMoney(
+            state.movement.outwardQty +
+              (partyMovement ? direction * qty : signedBucketQty),
+          );
+          state.movement.outwardValue = normalizeMoney(
+            state.movement.outwardValue +
+              (partyMovement ? direction * value : signedBucketValue),
+          );
+          state.movement.lastOutwardRate = effectiveRate;
+          state.currentQty = normalizeMoney(state.currentQty + stockDeltaQty);
+          state.lastOutwardAt = voucher.date || state.lastOutwardAt;
+          state.history.push({
+            voucherId: voucher._id,
+            date: voucher.date || null,
+            dateLabel: formatDateLabel(voucher.date),
+            voucherName: voucher.voucherName || "Voucher",
+            number:
+              voucher.number ||
+              voucher.invoiceNumber ||
+              voucher.voucherNumber ||
+              "",
+            direction: partyMovement?.directionLabel || movement.directionLabel,
+            qty: normalizeMoney(
+              partyMovement ? direction * qty : signedBucketQty,
+            ),
+            rate: effectiveRate,
+            value: normalizeMoney(
+              partyMovement ? direction * value : signedBucketValue,
+            ),
+            closingQty: state.currentQty,
+            closingRate: state.currentRate,
+            closingValue: normalizeMoney(state.currentQty * state.currentRate),
+            itemName: normalizeName(line.itemName || state.item?.name || ""),
+            partyLedgerId,
+            partyLedgerName: normalizeName(partyLedger?.name || ""),
+            partyGroupId,
+            partyGroupName: normalizeName(partyGroupName),
+          });
+        }
+      }
 
-        itemStateMap.set(key, state);
-      });
+      itemStateMap.set(key, state);
     });
+  });
 
   const rows = [...itemStateMap.values()]
     .map((state) => {
@@ -2698,17 +2744,19 @@ async function buildInventoryMovementDimensionReport(
     ? String(options.salesPersonId)
     : "";
   if (dimension === "sales-person") {
-    const vouchers = await Vouchers.find(activeVoucherFilter({
-      companyId,
-      ...(fromDate || toDate
-        ? {
-            date: {
-              ...(fromDate ? { $gte: fromDate } : {}),
-              ...(toDate ? { $lte: toDate } : {}),
-            },
-          }
-        : {}),
-    }))
+    const vouchers = await Vouchers.find(
+      activeVoucherFilter({
+        companyId,
+        ...(fromDate || toDate
+          ? {
+              date: {
+                ...(fromDate ? { $gte: fromDate } : {}),
+                ...(toDate ? { $lte: toDate } : {}),
+              },
+            }
+          : {}),
+      }),
+    )
       .sort({ date: -1, createdAt: -1 })
       .toArray();
 
@@ -2907,11 +2955,13 @@ async function buildInventoryMovementDimensionReport(
   }
 
   const [vouchers, ledgers, items, groups] = await Promise.all([
-    Vouchers.find(activeVoucherFilter({
-      companyId,
-      ...(toDate ? { date: { $lte: toDate } } : {}),
-      inventoryLines: { $exists: true, $ne: [] },
-    })).toArray(),
+    Vouchers.find(
+      activeVoucherFilter({
+        companyId,
+        ...(toDate ? { date: { $lte: toDate } } : {}),
+        inventoryLines: { $exists: true, $ne: [] },
+      }),
+    ).toArray(),
     Ledgers.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
     Groups.find({ companyId }).toArray(),
@@ -2955,86 +3005,90 @@ async function buildInventoryMovementDimensionReport(
   }
 
   sortVouchersByDateAscending(vouchers).forEach((voucher) => {
-      if (requestedSalesPersonId) {
-        if (!/^sales$/i.test(String(voucher.voucherName || ""))) return;
-        if (!voucherMatchesSalesPerson(voucher, requestedSalesPersonId)) return;
+    if (requestedSalesPersonId) {
+      if (!/^sales$/i.test(String(voucher.voucherName || ""))) return;
+      if (!voucherMatchesSalesPerson(voucher, requestedSalesPersonId)) return;
+    }
+    if (!Array.isArray(voucher.inventoryLines)) return;
+
+    const voucherTime = getVoucherTime(voucher?.date);
+    const hasVoucherTime = voucherTime !== 0;
+    const beforePeriod =
+      fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
+    const inPeriod =
+      fromTime === null ||
+      (hasVoucherTime &&
+        voucherTime >= fromTime &&
+        (toTime === null || voucherTime <= toTime));
+
+    const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
+    if (!partyLedger) return;
+    const ledgerKey = String(partyLedger._id);
+    const state = ledgerStateMap.get(ledgerKey) || {
+      id: ledgerKey,
+      groupId: String(partyLedger.groupId || ""),
+      name: partyLedger.name || "Unnamed Ledger",
+      secondaryLabel: getGroupPath(partyLedger.groupId),
+      metrics: emptyMovementAccumulator(),
+    };
+
+    voucher.inventoryLines.forEach((line) => {
+      if (!line?.itemId) return;
+      const item = itemMap.get(String(line.itemId)) || {};
+
+      const stockDirection = getInventoryLineDirection(
+        line,
+        voucher.voucherName,
+      );
+      if (stockDirection === 0) return;
+      const partyMovement = usePartyPerspective
+        ? getPartyMovementDescriptor(voucher.voucherName)
+        : null;
+      const direction = partyMovement ? partyMovement.sign : stockDirection;
+      const bucket = partyMovement
+        ? partyMovement.bucket
+        : direction > 0
+        ? "inward"
+        : "outward";
+
+      const qty = normalizeMoney(Number(line.qty) || 0);
+      const rate = normalizeMoney(Number(line.rate) || 0);
+      const value = normalizeMoney(qty * rate);
+
+      if (beforePeriod) {
+        state.metrics.openingQty = normalizeMoney(
+          state.metrics.openingQty +
+            (bucket === "inward" ? direction * qty : -direction * qty),
+        );
+        state.metrics.openingValue = normalizeMoney(
+          state.metrics.openingValue +
+            (bucket === "inward" ? direction * value : -direction * value),
+        );
       }
-      if (!Array.isArray(voucher.inventoryLines)) return;
 
-      const voucherTime = getVoucherTime(voucher?.date);
-      const hasVoucherTime = voucherTime !== 0;
-      const beforePeriod =
-        fromTime !== null && hasVoucherTime ? voucherTime < fromTime : false;
-      const inPeriod =
-        fromTime === null ||
-        (hasVoucherTime &&
-          voucherTime >= fromTime &&
-          (toTime === null || voucherTime <= toTime));
-
-      const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
-      if (!partyLedger) return;
-      const ledgerKey = String(partyLedger._id);
-      const state = ledgerStateMap.get(ledgerKey) || {
-        id: ledgerKey,
-        groupId: String(partyLedger.groupId || ""),
-        name: partyLedger.name || "Unnamed Ledger",
-        secondaryLabel: getGroupPath(partyLedger.groupId),
-        metrics: emptyMovementAccumulator(),
-      };
-
-      voucher.inventoryLines.forEach((line) => {
-        if (!line?.itemId) return;
-        const item = itemMap.get(String(line.itemId)) || {};
-
-        const stockDirection = getInventoryLineDirection(line, voucher.voucherName);
-        if (stockDirection === 0) return;
-        const partyMovement = usePartyPerspective
-          ? getPartyMovementDescriptor(voucher.voucherName)
-          : null;
-        const direction = partyMovement ? partyMovement.sign : stockDirection;
-        const bucket = partyMovement
-          ? partyMovement.bucket
-          : direction > 0
-          ? "inward"
-          : "outward";
-
-        const qty = normalizeMoney(Number(line.qty) || 0);
-        const rate = normalizeMoney(Number(line.rate) || 0);
-        const value = normalizeMoney(qty * rate);
-
-        if (beforePeriod) {
-          state.metrics.openingQty = normalizeMoney(
-            state.metrics.openingQty + (bucket === "inward" ? direction * qty : -direction * qty),
+      if (inPeriod) {
+        if (bucket === "inward") {
+          state.metrics.inwardQty = normalizeMoney(
+            state.metrics.inwardQty + (partyMovement ? direction * qty : qty),
           );
-          state.metrics.openingValue = normalizeMoney(
-            state.metrics.openingValue + (bucket === "inward" ? direction * value : -direction * value),
+          state.metrics.inwardValue = normalizeMoney(
+            state.metrics.inwardValue +
+              (partyMovement ? direction * value : value),
+          );
+        } else {
+          state.metrics.outwardQty = normalizeMoney(
+            state.metrics.outwardQty + (partyMovement ? direction * qty : qty),
+          );
+          state.metrics.outwardValue = normalizeMoney(
+            state.metrics.outwardValue +
+              (partyMovement ? direction * value : value),
           );
         }
-
-        if (inPeriod) {
-          if (bucket === "inward") {
-            state.metrics.inwardQty = normalizeMoney(
-              state.metrics.inwardQty + (partyMovement ? direction * qty : qty),
-            );
-            state.metrics.inwardValue = normalizeMoney(
-              state.metrics.inwardValue +
-                (partyMovement ? direction * value : value),
-            );
-          } else {
-            state.metrics.outwardQty = normalizeMoney(
-              state.metrics.outwardQty +
-                (partyMovement ? direction * qty : qty),
-            );
-            state.metrics.outwardValue = normalizeMoney(
-              state.metrics.outwardValue +
-                (partyMovement ? direction * value : value),
-            );
-          }
-        }
-      });
-
-      ledgerStateMap.set(ledgerKey, state);
+      }
     });
+
+    ledgerStateMap.set(ledgerKey, state);
+  });
 
   if (dimension === "ledger") {
     const rows = [...ledgerStateMap.values()]
@@ -3126,17 +3180,19 @@ async function buildSalesPersonDrillReport(
   const [groups, items, vouchers] = await Promise.all([
     Groups.find({ companyId }).toArray(),
     Items.find({ companyId }).toArray(),
-    Vouchers.find(activeVoucherFilter({
-      companyId,
-      ...(fromDate || toDate
-        ? {
-            date: {
-              ...(fromDate ? { $gte: fromDate } : {}),
-              ...(toDate ? { $lte: toDate } : {}),
-            },
-          }
-        : {}),
-    }))
+    Vouchers.find(
+      activeVoucherFilter({
+        companyId,
+        ...(fromDate || toDate
+          ? {
+              date: {
+                ...(fromDate ? { $gte: fromDate } : {}),
+                ...(toDate ? { $lte: toDate } : {}),
+              },
+            }
+          : {}),
+      }),
+    )
       .sort({ date: -1, createdAt: -1 })
       .toArray(),
   ]);
@@ -3371,18 +3427,20 @@ async function buildPartyMovementDetailReport(
   const requestedLedgerName = normalizeName(ledgerName || "").toLowerCase();
 
   const [vouchers, ledgers, items, groups] = await Promise.all([
-    Vouchers.find(activeVoucherFilter({
-      companyId,
-      ...(fromDate || toDate
-        ? {
-            date: {
-              ...(fromDate ? { $gte: fromDate } : {}),
-              ...(toDate ? { $lte: toDate } : {}),
-            },
-      }
-        : {}),
-      inventoryLines: { $exists: true, $ne: [] },
-    }))
+    Vouchers.find(
+      activeVoucherFilter({
+        companyId,
+        ...(fromDate || toDate
+          ? {
+              date: {
+                ...(fromDate ? { $gte: fromDate } : {}),
+                ...(toDate ? { $lte: toDate } : {}),
+              },
+            }
+          : {}),
+        inventoryLines: { $exists: true, $ne: [] },
+      }),
+    )
       .sort({ date: -1, createdAt: -1 })
       .toArray(),
     Ledgers.find({ companyId }).toArray(),
@@ -3427,6 +3485,8 @@ async function buildPartyMovementDetailReport(
     if (!partyLedger) return;
 
     const partyLedgerId = String(partyLedger._id || "");
+    const fromTime = fromDate ? fromDate.getTime() : null;
+    const toTime = toDate ? toDate.getTime() : null;
     const partyGroupId = String(partyLedger.groupId || "");
     const partyGroupName = normalizeName(
       groupById.get(partyGroupId)?.name || "",
@@ -3544,9 +3604,9 @@ async function buildPartyMovementDetailReport(
     const targetState = requestedLedgerId
       ? ledgerStateMap.get(requestedLedgerId)
       : [...ledgerStateMap.values()].find(
-      (row) =>
-        normalizeName(row.name || "").toLowerCase() === requestedLedgerName,
-    );
+          (row) =>
+            normalizeName(row.name || "").toLowerCase() === requestedLedgerName,
+        );
 
     const rows = (targetState?.voucherRows || [])
       .slice()
@@ -3591,12 +3651,15 @@ async function buildPartyMovementDetailReport(
       .sort((left, right) => left.name.localeCompare(right.name));
 
     childGroups.forEach((group) => {
-      const rawMetrics = [...ledgerStateMap.values()].reduce((sum, ledgerState) => {
-        if (isDescendantGroup(ledgerState.groupId, group._id)) {
-          addMovementTotals(sum, ledgerState.metrics);
-        }
-        return sum;
-      }, emptyMovementAccumulator());
+      const rawMetrics = [...ledgerStateMap.values()].reduce(
+        (sum, ledgerState) => {
+          if (isDescendantGroup(ledgerState.groupId, group._id)) {
+            addMovementTotals(sum, ledgerState.metrics);
+          }
+          return sum;
+        },
+        emptyMovementAccumulator(),
+      );
 
       const metrics = buildMovementMetrics({
         ...rawMetrics,
@@ -4060,18 +4123,20 @@ async function buildProductionRegister(
   toDate = null,
 ) {
   const [vouchers, companies] = await Promise.all([
-    Vouchers.find(activeVoucherFilter({
-      companyId,
-      ...(fromDate || toDate
-        ? {
-            date: {
-              ...(fromDate ? { $gte: fromDate } : {}),
-              ...(toDate ? { $lte: toDate } : {}),
-            },
-          }
-        : {}),
-      "manufacturingMeta.outputItemId": { $exists: true },
-    }))
+    Vouchers.find(
+      activeVoucherFilter({
+        companyId,
+        ...(fromDate || toDate
+          ? {
+              date: {
+                ...(fromDate ? { $gte: fromDate } : {}),
+                ...(toDate ? { $lte: toDate } : {}),
+              },
+            }
+          : {}),
+        "manufacturingMeta.outputItemId": { $exists: true },
+      }),
+    )
       .sort({ date: -1, createdAt: -1 })
       .toArray(),
     Companies.findOne({ _id: companyId }),
@@ -4124,19 +4189,21 @@ async function buildComponentConsumptionReport(
   toDate = null,
 ) {
   const [vouchers, items] = await Promise.all([
-    Vouchers.find(activeVoucherFilter({
-      companyId,
-      ...(fromDate || toDate
-        ? {
-            date: {
-              ...(fromDate ? { $gte: fromDate } : {}),
-              ...(toDate ? { $lte: toDate } : {}),
-            },
-          }
-        : {}),
-      "manufacturingMeta.outputItemId": { $exists: true },
-      inventoryLines: { $exists: true, $ne: [] },
-    })).toArray(),
+    Vouchers.find(
+      activeVoucherFilter({
+        companyId,
+        ...(fromDate || toDate
+          ? {
+              date: {
+                ...(fromDate ? { $gte: fromDate } : {}),
+                ...(toDate ? { $lte: toDate } : {}),
+              },
+            }
+          : {}),
+        "manufacturingMeta.outputItemId": { $exists: true },
+        inventoryLines: { $exists: true, $ne: [] },
+      }),
+    ).toArray(),
     Items.find({ companyId }).toArray(),
   ]);
 
@@ -4186,7 +4253,8 @@ async function buildComponentConsumptionReport(
 function summarizeBomBottleneck(bom = {}) {
   const components = Array.isArray(bom.components) ? bom.components : [];
   const constrained = components.filter(
-    (component) => component.requiredPerUnit > 0 && component.possibleOutput !== null,
+    (component) =>
+      component.requiredPerUnit > 0 && component.possibleOutput !== null,
   );
 
   if (constrained.length === 0) {
@@ -4230,8 +4298,12 @@ async function buildManufacturingDashboard(companyId) {
   const activeBoms = enrichedBoms.filter(
     (row) => nameKey(row.status || "active") !== "inactive",
   );
-  const readyBoms = activeBoms.filter((row) => Number(row.maxProducible || 0) > 0);
-  const blockedBoms = activeBoms.filter((row) => Number(row.maxProducible || 0) <= 0);
+  const readyBoms = activeBoms.filter(
+    (row) => Number(row.maxProducible || 0) > 0,
+  );
+  const blockedBoms = activeBoms.filter(
+    (row) => Number(row.maxProducible || 0) <= 0,
+  );
 
   const bomCapacityRows = activeBoms
     .map((bom) => {
@@ -4243,7 +4315,9 @@ async function buildManufacturingDashboard(companyId) {
         finishedItemName: bom.finishedItemName || "",
         outputQty: normalizeMoney(bom.outputQty || 0),
         unitName: bom.unitName || "",
-        componentsCount: Array.isArray(bom.components) ? bom.components.length : 0,
+        componentsCount: Array.isArray(bom.components)
+          ? bom.components.length
+          : 0,
         maxProducible: normalizeMoney(bom.maxProducible || 0),
         effectiveRate: normalizeMoney(bom.effectiveRate || 0),
         totalCost: normalizeMoney(bom.totalCost || 0),
@@ -4273,7 +4347,10 @@ async function buildManufacturingDashboard(companyId) {
       inwardQty: normalizeMoney(row.inwardQty || 0),
       outwardQty: normalizeMoney(row.outwardQty || 0),
     }))
-    .sort((left, right) => Number(right.closingValue || 0) - Number(left.closingValue || 0));
+    .sort(
+      (left, right) =>
+        Number(right.closingValue || 0) - Number(left.closingValue || 0),
+    );
 
   const topRawMaterials = rawMaterialRows.slice(0, 8);
   const topBuildOpportunities = bomCapacityRows.slice(0, 8);
@@ -4701,14 +4778,14 @@ app.post("/companies", async (req, res) => {
     const normalizedMasterUsername = normalizeName(masterUsername);
     if (requireCompanyLogin) {
       if (!normalizedMasterUsername) {
-        return res
-          .status(400)
-          .json({ message: "Master username is required when company login is enabled" });
+        return res.status(400).json({
+          message: "Master username is required when company login is enabled",
+        });
       }
       if (!String(masterPassword || "").trim()) {
-        return res
-          .status(400)
-          .json({ message: "Master password is required when company login is enabled" });
+        return res.status(400).json({
+          message: "Master password is required when company login is enabled",
+        });
       }
     }
 
@@ -4813,100 +4890,109 @@ app.get("/companies/:companyId/masters/overview", async (req, res) => {
   }
 });
 
-app.put("/companies/:companyId", requireCompanyWriteAccess(ROLE_GROUPS.companyAdmin), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const name = normalizeName(req.body.name);
-    if (!name) {
-      return res.status(400).json({ message: "Company name is required" });
-    }
+app.put(
+  "/companies/:companyId",
+  requireCompanyWriteAccess(ROLE_GROUPS.companyAdmin),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const name = normalizeName(req.body.name);
+      if (!name) {
+        return res.status(400).json({ message: "Company name is required" });
+      }
 
-    const existing = await Companies.findOne({
-      _id: { $ne: companyId },
-      name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
-    });
-    if (existing) {
-      return res
-        .status(400)
-        .json({ message: "A company with this name already exists" });
-    }
+      const existing = await Companies.findOne({
+        _id: { $ne: companyId },
+        name: new RegExp(
+          `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          "i",
+        ),
+      });
+      if (existing) {
+        return res
+          .status(400)
+          .json({ message: "A company with this name already exists" });
+      }
 
-    const update = {
-      $set: {
-        name,
-        financialYearFrom: req.body.financialYearFrom || "",
-        financialYearTo: req.body.financialYearTo || "",
-        booksBeginningFrom: req.body.booksBeginningFrom || "",
-        mailingName: req.body.mailingName || "",
-        country: req.body.country || "",
-        address: req.body.address || "",
-        state: req.body.state || "",
-        city: req.body.city || "",
-        postalCode: req.body.postalCode || "",
-        telephone: req.body.telephone || "",
-        mobile: req.body.mobile || "",
-        fax: req.body.fax || "",
-        email: req.body.email || "",
-        website: req.body.website || "",
-        division: req.body.division || "",
-        baseCurrencyCode: req.body.baseCurrencyCode || "BDT",
-        baseCurrencySymbol: req.body.baseCurrencySymbol || "TK",
-        formalName: req.body.formalName || "Bangladeshi Taka",
-        decimalPlaces: Number(req.body.decimalPlaces || 2),
-        incomeTaxNumber: req.body.incomeTaxNumber || "",
-        vatTinNumber: req.body.vatTinNumber || "",
-        serviceTaxNumber: req.body.serviceTaxNumber || "",
-        panNumber: req.body.panNumber || "",
-        options: {
-          enableInventoryManagement:
-            req.body.enableInventoryManagement !== false,
-          enableBillWiseDetails: Boolean(req.body.enableBillWiseDetails),
-          enableCostCentres: Boolean(req.body.enableCostCentres),
-          enableMultiCurrency: Boolean(req.body.enableMultiCurrency),
+      const update = {
+        $set: {
+          name,
+          financialYearFrom: req.body.financialYearFrom || "",
+          financialYearTo: req.body.financialYearTo || "",
+          booksBeginningFrom: req.body.booksBeginningFrom || "",
+          mailingName: req.body.mailingName || "",
+          country: req.body.country || "",
+          address: req.body.address || "",
+          state: req.body.state || "",
+          city: req.body.city || "",
+          postalCode: req.body.postalCode || "",
+          telephone: req.body.telephone || "",
+          mobile: req.body.mobile || "",
+          fax: req.body.fax || "",
+          email: req.body.email || "",
+          website: req.body.website || "",
+          division: req.body.division || "",
+          baseCurrencyCode: req.body.baseCurrencyCode || "BDT",
+          baseCurrencySymbol: req.body.baseCurrencySymbol || "TK",
+          formalName: req.body.formalName || "Bangladeshi Taka",
+          decimalPlaces: Number(req.body.decimalPlaces || 2),
+          incomeTaxNumber: req.body.incomeTaxNumber || "",
+          vatTinNumber: req.body.vatTinNumber || "",
+          serviceTaxNumber: req.body.serviceTaxNumber || "",
+          panNumber: req.body.panNumber || "",
+          options: {
+            enableInventoryManagement:
+              req.body.enableInventoryManagement !== false,
+            enableBillWiseDetails: Boolean(req.body.enableBillWiseDetails),
+            enableCostCentres: Boolean(req.body.enableCostCentres),
+            enableMultiCurrency: Boolean(req.body.enableMultiCurrency),
+          },
+          updatedAt: new Date(),
         },
-        updatedAt: new Date(),
-      },
-    };
-
-    const requireCompanyLogin = Boolean(req.body.requireCompanyLogin);
-    const normalizedMasterUsername = normalizeName(req.body.masterUsername);
-    const masterPassword = String(req.body.masterPassword || "").trim();
-
-    if (requireCompanyLogin) {
-      const existingCompany = await Companies.findOne({ _id: companyId });
-      if (!normalizedMasterUsername) {
-        return res
-          .status(400)
-          .json({ message: "Master username is required when company login is enabled" });
-      }
-      if (!masterPassword && !existingCompany?.auth?.enabled) {
-        return res
-          .status(400)
-          .json({ message: "Master password is required when company login is enabled" });
-      }
-
-      update.$set.auth = {
-        ...(existingCompany?.auth || {}),
-        enabled: true,
-        masterUsername: normalizedMasterUsername,
-        updatedAt: new Date(),
       };
-      if (masterPassword) {
-        Object.assign(update.$set.auth, hashCompanyPassword(masterPassword));
-      }
-    } else {
-      update.$set.auth = { enabled: false };
-    }
 
-    await Companies.updateOne({ _id: companyId }, update);
-    const company = await Companies.findOne({ _id: companyId });
-    await ensureCompanyBaseCurrency(company);
-    res.json(sanitizeCompany(company));
-  } catch (err) {
-    console.error("Error updating company:", err);
-    res.status(500).json({ message: "Error updating company" });
-  }
-});
+      const requireCompanyLogin = Boolean(req.body.requireCompanyLogin);
+      const normalizedMasterUsername = normalizeName(req.body.masterUsername);
+      const masterPassword = String(req.body.masterPassword || "").trim();
+
+      if (requireCompanyLogin) {
+        const existingCompany = await Companies.findOne({ _id: companyId });
+        if (!normalizedMasterUsername) {
+          return res.status(400).json({
+            message:
+              "Master username is required when company login is enabled",
+          });
+        }
+        if (!masterPassword && !existingCompany?.auth?.enabled) {
+          return res.status(400).json({
+            message:
+              "Master password is required when company login is enabled",
+          });
+        }
+
+        update.$set.auth = {
+          ...(existingCompany?.auth || {}),
+          enabled: true,
+          masterUsername: normalizedMasterUsername,
+          updatedAt: new Date(),
+        };
+        if (masterPassword) {
+          Object.assign(update.$set.auth, hashCompanyPassword(masterPassword));
+        }
+      } else {
+        update.$set.auth = { enabled: false };
+      }
+
+      await Companies.updateOne({ _id: companyId }, update);
+      const company = await Companies.findOne({ _id: companyId });
+      await ensureCompanyBaseCurrency(company);
+      res.json(sanitizeCompany(company));
+    } catch (err) {
+      console.error("Error updating company:", err);
+      res.status(500).json({ message: "Error updating company" });
+    }
+  },
+);
 
 app.post(
   "/companies/:companyId/authenticate",
@@ -4917,37 +5003,44 @@ app.post(
     message: "Too many company login attempts. Please wait and try again.",
   }),
   async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const company = await Companies.findOne({ _id: companyId });
-    if (!company) {
-      return res.status(404).json({ message: "Company not found" });
-    }
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const company = await Companies.findOne({ _id: companyId });
+      if (!company) {
+        return res.status(404).json({ message: "Company not found" });
+      }
 
-    const auth = company.auth || {};
-    if (!auth.enabled) {
+      const auth = company.auth || {};
+      if (!auth.enabled) {
+        return res.json({ ok: true, company: sanitizeCompany(company) });
+      }
+
+      const username = normalizeName(req.body.masterUsername);
+      const password = String(req.body.masterPassword || "");
+      if (!username || !password) {
+        return res
+          .status(400)
+          .json({ message: "Master username and password are required" });
+      }
+
+      if (username !== normalizeName(auth.masterUsername)) {
+        return res
+          .status(401)
+          .json({ message: "Invalid master username or password" });
+      }
+      if (!verifyCompanyPassword(password, auth)) {
+        return res
+          .status(401)
+          .json({ message: "Invalid master username or password" });
+      }
+
       return res.json({ ok: true, company: sanitizeCompany(company) });
+    } catch (err) {
+      console.error("Error authenticating company:", err);
+      res.status(500).json({ message: "Error authenticating company" });
     }
-
-    const username = normalizeName(req.body.masterUsername);
-    const password = String(req.body.masterPassword || "");
-    if (!username || !password) {
-      return res.status(400).json({ message: "Master username and password are required" });
-    }
-
-    if (username !== normalizeName(auth.masterUsername)) {
-      return res.status(401).json({ message: "Invalid master username or password" });
-    }
-    if (!verifyCompanyPassword(password, auth)) {
-      return res.status(401).json({ message: "Invalid master username or password" });
-    }
-
-    return res.json({ ok: true, company: sanitizeCompany(company) });
-  } catch (err) {
-    console.error("Error authenticating company:", err);
-    res.status(500).json({ message: "Error authenticating company" });
-  }
-});
+  },
+);
 
 app.post(
   "/companies/:companyId/employee-authenticate",
@@ -4958,48 +5051,60 @@ app.post(
     message: "Too many employee login attempts. Please wait and try again.",
   }),
   async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const company = await Companies.findOne({ _id: companyId });
-    if (!company) {
-      return res.status(404).json({ message: "Company not found" });
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const company = await Companies.findOne({ _id: companyId });
+      if (!company) {
+        return res.status(404).json({ message: "Company not found" });
+      }
+
+      const username = normalizeTextBlock(req.body.username).toLowerCase();
+      const password = String(req.body.password || "");
+      if (!username || !password) {
+        return res
+          .status(400)
+          .json({ message: "Username and password are required" });
+      }
+
+      const employee = await Employees.findOne({
+        companyId,
+        "accessControl.loginEnabled": true,
+        "accessControl.username": {
+          $regex: `^${escapeRegex(username)}$`,
+          $options: "i",
+        },
+      });
+
+      if (!employee) {
+        return res
+          .status(401)
+          .json({ message: "Invalid username or password" });
+      }
+
+      if (normalizeName(employee.accessControl?.status) === "inactive") {
+        return res
+          .status(403)
+          .json({ message: "This employee login is inactive" });
+      }
+
+      if (!verifyCompanyPassword(password, employee.auth || {})) {
+        return res
+          .status(401)
+          .json({ message: "Invalid username or password" });
+      }
+
+      return res.json({
+        ok: true,
+        company: sanitizeCompany(company),
+        user: buildEmployeeSessionUser(employee, company),
+        token: createEmployeeSessionToken(employee, company),
+      });
+    } catch (err) {
+      console.error("Error authenticating employee:", err);
+      res.status(500).json({ message: "Error authenticating employee" });
     }
-
-    const username = normalizeTextBlock(req.body.username).toLowerCase();
-    const password = String(req.body.password || "");
-    if (!username || !password) {
-      return res.status(400).json({ message: "Username and password are required" });
-    }
-
-    const employee = await Employees.findOne({
-      companyId,
-      "accessControl.loginEnabled": true,
-      "accessControl.username": { $regex: `^${escapeRegex(username)}$`, $options: "i" },
-    });
-
-    if (!employee) {
-      return res.status(401).json({ message: "Invalid username or password" });
-    }
-
-    if (normalizeName(employee.accessControl?.status) === "inactive") {
-      return res.status(403).json({ message: "This employee login is inactive" });
-    }
-
-    if (!verifyCompanyPassword(password, employee.auth || {})) {
-      return res.status(401).json({ message: "Invalid username or password" });
-    }
-
-    return res.json({
-      ok: true,
-      company: sanitizeCompany(company),
-      user: buildEmployeeSessionUser(employee, company),
-      token: createEmployeeSessionToken(employee, company),
-    });
-  } catch (err) {
-    console.error("Error authenticating employee:", err);
-    res.status(500).json({ message: "Error authenticating employee" });
-  }
-});
+  },
+);
 
 app.get(
   "/companies/:companyId/audit-logs",
@@ -5015,8 +5120,7 @@ app.get(
         entityId = "",
         actorId = "",
         search = "",
-      } =
-        req.query || {};
+      } = req.query || {};
 
       const filter = { companyId };
 
@@ -5106,172 +5210,184 @@ app.get("/companies/:companyId/groups", async (req, res) => {
 });
 
 // Create group
-app.post("/companies/:companyId/groups", requireCompanyWriteAccess(ROLE_GROUPS.groupMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const name = normalizeName(req.body.name);
-    const { parentId, nature, affectsGrossProfit } = req.body;
-    if (!name) {
-      return res.status(400).json({ message: "Group name is required" });
-    }
+app.post(
+  "/companies/:companyId/groups",
+  requireCompanyWriteAccess(ROLE_GROUPS.groupMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const name = normalizeName(req.body.name);
+      const { parentId, nature, affectsGrossProfit } = req.body;
+      if (!name) {
+        return res.status(400).json({ message: "Group name is required" });
+      }
 
-    const duplicate = await Groups.findOne({
-      companyId,
-      name: {
-        $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-        $options: "i",
-      },
-    });
-    if (duplicate) {
-      return res.status(400).json({ message: "Group name already exists" });
-    }
-
-    if (parentId) {
-      const parent = await Groups.findOne({
-        _id: new ObjectId(parentId),
+      const duplicate = await Groups.findOne({
         companyId,
+        name: {
+          $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          $options: "i",
+        },
       });
-      if (!parent) {
-        return res.status(400).json({ message: "Parent group not found" });
+      if (duplicate) {
+        return res.status(400).json({ message: "Group name already exists" });
       }
-    }
 
-    const doc = {
-      companyId,
-      name,
-      parentId: parentId ? new ObjectId(parentId) : null,
-      nature, // 'ASSET' | 'LIABILITY' | 'INCOME' | 'EXPENSE'
-      affectsGrossProfit: !!affectsGrossProfit,
-      createdAt: new Date(),
-    };
-
-    const result = await Groups.insertOne(doc);
-    res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (err) {
-    console.error("Error creating group:", err);
-    res.status(500).json({ message: "Error creating group" });
-  }
-});
-
-// Alter group
-app.put("/companies/:companyId/groups/:groupId", requireCompanyWriteAccess(ROLE_GROUPS.groupMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const groupId = new ObjectId(req.params.groupId);
-    const name = normalizeName(req.body.name);
-    const { parentId, nature, affectsGrossProfit } = req.body;
-    if (!name) {
-      return res.status(400).json({ message: "Group name is required" });
-    }
-
-    const duplicate = await Groups.findOne({
-      _id: { $ne: groupId },
-      companyId,
-      name: {
-        $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-        $options: "i",
-      },
-    });
-    if (duplicate) {
-      return res.status(400).json({ message: "Group name already exists" });
-    }
-
-    if (parentId) {
-      const parentObjectId = new ObjectId(parentId);
-      if (String(parentObjectId) === String(groupId)) {
-        return res
-          .status(400)
-          .json({ message: "Group cannot be parent of itself" });
+      if (parentId) {
+        const parent = await Groups.findOne({
+          _id: new ObjectId(parentId),
+          companyId,
+        });
+        if (!parent) {
+          return res.status(400).json({ message: "Parent group not found" });
+        }
       }
-      const parent = await Groups.findOne({ _id: parentObjectId, companyId });
-      if (!parent) {
-        return res.status(400).json({ message: "Parent group not found" });
-      }
-    }
 
-    const update = {
-      $set: {
+      const doc = {
+        companyId,
         name,
         parentId: parentId ? new ObjectId(parentId) : null,
-        nature,
+        nature, // 'ASSET' | 'LIABILITY' | 'INCOME' | 'EXPENSE'
         affectsGrossProfit: !!affectsGrossProfit,
-      },
-    };
+        createdAt: new Date(),
+      };
 
-    await Groups.updateOne({ _id: groupId, companyId }, update);
-    const updated = await Groups.findOne({ _id: groupId, companyId });
-    res.json(updated);
-  } catch (err) {
-    console.error("Error updating group:", err);
-    res.status(500).json({ message: "Error updating group" });
-  }
-});
+      const result = await Groups.insertOne(doc);
+      res.status(201).json({ _id: result.insertedId, ...doc });
+    } catch (err) {
+      console.error("Error creating group:", err);
+      res.status(500).json({ message: "Error creating group" });
+    }
+  },
+);
+
+// Alter group
+app.put(
+  "/companies/:companyId/groups/:groupId",
+  requireCompanyWriteAccess(ROLE_GROUPS.groupMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const groupId = new ObjectId(req.params.groupId);
+      const name = normalizeName(req.body.name);
+      const { parentId, nature, affectsGrossProfit } = req.body;
+      if (!name) {
+        return res.status(400).json({ message: "Group name is required" });
+      }
+
+      const duplicate = await Groups.findOne({
+        _id: { $ne: groupId },
+        companyId,
+        name: {
+          $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          $options: "i",
+        },
+      });
+      if (duplicate) {
+        return res.status(400).json({ message: "Group name already exists" });
+      }
+
+      if (parentId) {
+        const parentObjectId = new ObjectId(parentId);
+        if (String(parentObjectId) === String(groupId)) {
+          return res
+            .status(400)
+            .json({ message: "Group cannot be parent of itself" });
+        }
+        const parent = await Groups.findOne({ _id: parentObjectId, companyId });
+        if (!parent) {
+          return res.status(400).json({ message: "Parent group not found" });
+        }
+      }
+
+      const update = {
+        $set: {
+          name,
+          parentId: parentId ? new ObjectId(parentId) : null,
+          nature,
+          affectsGrossProfit: !!affectsGrossProfit,
+        },
+      };
+
+      await Groups.updateOne({ _id: groupId, companyId }, update);
+      const updated = await Groups.findOne({ _id: groupId, companyId });
+      res.json(updated);
+    } catch (err) {
+      console.error("Error updating group:", err);
+      res.status(500).json({ message: "Error updating group" });
+    }
+  },
+);
 
 // Delete group (guard: no dependent groups/ledgers/items or voucher usage in the branch)
-app.delete("/companies/:companyId/groups/:groupId", requireCompanyWriteAccess(ROLE_GROUPS.groupMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const groupId = new ObjectId(req.params.groupId);
-    const existingGroup = await Groups.findOne({ _id: groupId, companyId });
-    if (!existingGroup) {
-      return res.status(404).json({ message: "Group not found" });
+app.delete(
+  "/companies/:companyId/groups/:groupId",
+  requireCompanyWriteAccess(ROLE_GROUPS.groupMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const groupId = new ObjectId(req.params.groupId);
+      const existingGroup = await Groups.findOne({ _id: groupId, companyId });
+      if (!existingGroup) {
+        return res.status(404).json({ message: "Group not found" });
+      }
+      if (existingGroup.isSystem) {
+        return res
+          .status(400)
+          .json({ message: "System groups cannot be deleted" });
+      }
+
+      const branchGroupIds = await getGroupBranchObjectIds(companyId, groupId);
+      const hasChildGroups = branchGroupIds.length > 1;
+
+      const [ledgerIds, itemIds] = await Promise.all([
+        Ledgers.find(
+          { companyId, groupId: { $in: branchGroupIds } },
+          { projection: { _id: 1 } },
+        ).toArray(),
+        Items.find(
+          { companyId, groupId: { $in: branchGroupIds } },
+          { projection: { _id: 1 } },
+        ).toArray(),
+      ]);
+
+      if (hasChildGroups || ledgerIds.length > 0 || itemIds.length > 0) {
+        return res.status(400).json({
+          message:
+            "Group is in use (has child groups, ledgers, or items). Cannot delete.",
+        });
+      }
+
+      const [ledgerVoucherUse, itemVoucherUse] = await Promise.all([
+        ledgerIds.length
+          ? Vouchers.countDocuments({
+              ...activeVoucherFilter({ companyId }),
+              "lines.ledgerId": { $in: ledgerIds.map((row) => row._id) },
+            })
+          : 0,
+        itemIds.length
+          ? Vouchers.countDocuments({
+              ...activeVoucherFilter({ companyId }),
+              "inventoryLines.itemId": { $in: itemIds.map((row) => row._id) },
+            })
+          : 0,
+      ]);
+
+      if (ledgerVoucherUse > 0 || itemVoucherUse > 0) {
+        return res.status(400).json({
+          message:
+            "Group is used in vouchers through its branch. Cannot delete.",
+        });
+      }
+
+      await Groups.deleteOne({ _id: groupId, companyId });
+      res.json({ message: "Group deleted" });
+    } catch (err) {
+      console.error("Error deleting group:", err);
+      res.status(500).json({ message: "Error deleting group" });
     }
-    if (existingGroup.isSystem) {
-      return res
-        .status(400)
-        .json({ message: "System groups cannot be deleted" });
-    }
-
-    const branchGroupIds = await getGroupBranchObjectIds(companyId, groupId);
-    const hasChildGroups = branchGroupIds.length > 1;
-
-    const [ledgerIds, itemIds] = await Promise.all([
-      Ledgers.find(
-        { companyId, groupId: { $in: branchGroupIds } },
-        { projection: { _id: 1 } },
-      ).toArray(),
-      Items.find(
-        { companyId, groupId: { $in: branchGroupIds } },
-        { projection: { _id: 1 } },
-      ).toArray(),
-    ]);
-
-    if (hasChildGroups || ledgerIds.length > 0 || itemIds.length > 0) {
-      return res.status(400).json({
-        message:
-          "Group is in use (has child groups, ledgers, or items). Cannot delete.",
-      });
-    }
-
-    const [ledgerVoucherUse, itemVoucherUse] = await Promise.all([
-      ledgerIds.length
-        ? Vouchers.countDocuments({
-            ...activeVoucherFilter({ companyId }),
-            "lines.ledgerId": { $in: ledgerIds.map((row) => row._id) },
-          })
-        : 0,
-      itemIds.length
-        ? Vouchers.countDocuments({
-            ...activeVoucherFilter({ companyId }),
-            "inventoryLines.itemId": { $in: itemIds.map((row) => row._id) },
-          })
-        : 0,
-    ]);
-
-    if (ledgerVoucherUse > 0 || itemVoucherUse > 0) {
-      return res.status(400).json({
-        message:
-          "Group is used in vouchers through its branch. Cannot delete.",
-      });
-    }
-
-    await Groups.deleteOne({ _id: groupId, companyId });
-    res.json({ message: "Group deleted" });
-  } catch (err) {
-    console.error("Error deleting group:", err);
-    res.status(500).json({ message: "Error deleting group" });
-  }
-});
+  },
+);
 
 // ---------- LEDGERS (CRUD) ----------
 
@@ -5430,78 +5546,26 @@ app.get("/companies/:companyId/ledgers/by-group", async (req, res) => {
 });
 
 // Create ledger
-app.post("/companies/:companyId/ledgers", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const name = normalizeName(req.body.name);
-    const {
-      groupId,
-      openingBalance = 0,
-      openingDrCr = "DR",
-      priceLevelId = null,
-      bankDetails = null,
-    } = req.body;
-    if (!name || !groupId) {
-      return res
-        .status(400)
-        .json({ message: "Ledger name and group are required" });
-    }
+app.post(
+  "/companies/:companyId/ledgers",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const name = normalizeName(req.body.name);
+      const {
+        groupId,
+        openingBalance = 0,
+        openingDrCr = "DR",
+        priceLevelId = null,
+        bankDetails = null,
+      } = req.body;
+      if (!name || !groupId) {
+        return res
+          .status(400)
+          .json({ message: "Ledger name and group are required" });
+      }
 
-    const group = await Groups.findOne({
-      _id: new ObjectId(groupId),
-      companyId,
-    });
-    if (!group) {
-      return res.status(400).json({ message: "Group not found" });
-    }
-
-    const duplicate = await Ledgers.findOne({
-      companyId,
-      name: {
-        $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-        $options: "i",
-      },
-    });
-    if (duplicate) {
-      return res.status(400).json({ message: "Ledger name already exists" });
-    }
-
-    const doc = {
-      companyId,
-      name,
-      groupId: new ObjectId(groupId),
-      openingBalance: Number(openingBalance) || 0,
-      openingDrCr,
-      priceLevelId: priceLevelId || null,
-      createdAt: new Date(),
-    };
-
-    const normalizedBankDetails = normalizeBankLedgerDetails(bankDetails);
-    if (normalizedBankDetails) {
-      doc.bankDetails = normalizedBankDetails;
-    }
-
-    const result = await Ledgers.insertOne(doc);
-    res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (err) {
-    console.error("Error creating ledger:", err);
-    res.status(500).json({ message: "Error creating ledger" });
-  }
-});
-
-// Alter ledger
-app.put("/companies/:companyId/ledgers/:ledgerId", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const ledgerId = new ObjectId(req.params.ledgerId);
-    const name = normalizeName(req.body.name);
-    const { groupId, openingBalance, openingDrCr, priceLevelId, bankDetails } =
-      req.body;
-    if (!name) {
-      return res.status(400).json({ message: "Ledger name is required" });
-    }
-
-    if (groupId) {
       const group = await Groups.findOne({
         _id: new ObjectId(groupId),
         companyId,
@@ -5509,88 +5573,160 @@ app.put("/companies/:companyId/ledgers/:ledgerId", requireCompanyWriteAccess(ROL
       if (!group) {
         return res.status(400).json({ message: "Group not found" });
       }
-    }
 
-    const duplicate = await Ledgers.findOne({
-      _id: { $ne: ledgerId },
-      companyId,
-      name: {
-        $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-        $options: "i",
-      },
-    });
-    if (duplicate) {
-      return res.status(400).json({ message: "Ledger name already exists" });
-    }
+      const duplicate = await Ledgers.findOne({
+        companyId,
+        name: {
+          $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          $options: "i",
+        },
+      });
+      if (duplicate) {
+        return res.status(400).json({ message: "Ledger name already exists" });
+      }
 
-    const update = {
-      $set: {
+      const doc = {
+        companyId,
         name,
-        groupId: groupId ? new ObjectId(groupId) : undefined,
-        openingBalance:
-          openingBalance !== undefined ? Number(openingBalance) : undefined,
+        groupId: new ObjectId(groupId),
+        openingBalance: Number(openingBalance) || 0,
         openingDrCr,
-        priceLevelId:
-          priceLevelId !== undefined ? priceLevelId || null : undefined,
-      },
-    };
+        priceLevelId: priceLevelId || null,
+        createdAt: new Date(),
+      };
 
-    if (bankDetails !== undefined) {
       const normalizedBankDetails = normalizeBankLedgerDetails(bankDetails);
       if (normalizedBankDetails) {
-        update.$set.bankDetails = normalizedBankDetails;
-      } else {
-        update.$unset = { ...(update.$unset || {}), bankDetails: "" };
+        doc.bankDetails = normalizedBankDetails;
       }
+
+      const result = await Ledgers.insertOne(doc);
+      res.status(201).json({ _id: result.insertedId, ...doc });
+    } catch (err) {
+      console.error("Error creating ledger:", err);
+      res.status(500).json({ message: "Error creating ledger" });
     }
+  },
+);
 
-    // Clean undefined keys
-    Object.keys(update.$set).forEach(
-      (k) => update.$set[k] === undefined && delete update.$set[k],
-    );
+// Alter ledger
+app.put(
+  "/companies/:companyId/ledgers/:ledgerId",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const ledgerId = new ObjectId(req.params.ledgerId);
+      const name = normalizeName(req.body.name);
+      const {
+        groupId,
+        openingBalance,
+        openingDrCr,
+        priceLevelId,
+        bankDetails,
+      } = req.body;
+      if (!name) {
+        return res.status(400).json({ message: "Ledger name is required" });
+      }
 
-    await Ledgers.updateOne({ _id: ledgerId, companyId }, update);
-    const updated = await Ledgers.findOne({ _id: ledgerId, companyId });
-    res.json(updated);
-  } catch (err) {
-    console.error("Error updating ledger:", err);
-    res.status(500).json({ message: "Error updating ledger" });
-  }
-});
+      if (groupId) {
+        const group = await Groups.findOne({
+          _id: new ObjectId(groupId),
+          companyId,
+        });
+        if (!group) {
+          return res.status(400).json({ message: "Group not found" });
+        }
+      }
+
+      const duplicate = await Ledgers.findOne({
+        _id: { $ne: ledgerId },
+        companyId,
+        name: {
+          $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          $options: "i",
+        },
+      });
+      if (duplicate) {
+        return res.status(400).json({ message: "Ledger name already exists" });
+      }
+
+      const update = {
+        $set: {
+          name,
+          groupId: groupId ? new ObjectId(groupId) : undefined,
+          openingBalance:
+            openingBalance !== undefined ? Number(openingBalance) : undefined,
+          openingDrCr,
+          priceLevelId:
+            priceLevelId !== undefined ? priceLevelId || null : undefined,
+        },
+      };
+
+      if (bankDetails !== undefined) {
+        const normalizedBankDetails = normalizeBankLedgerDetails(bankDetails);
+        if (normalizedBankDetails) {
+          update.$set.bankDetails = normalizedBankDetails;
+        } else {
+          update.$unset = { ...(update.$unset || {}), bankDetails: "" };
+        }
+      }
+
+      // Clean undefined keys
+      Object.keys(update.$set).forEach(
+        (k) => update.$set[k] === undefined && delete update.$set[k],
+      );
+
+      await Ledgers.updateOne({ _id: ledgerId, companyId }, update);
+      const updated = await Ledgers.findOne({ _id: ledgerId, companyId });
+      res.json(updated);
+    } catch (err) {
+      console.error("Error updating ledger:", err);
+      res.status(500).json({ message: "Error updating ledger" });
+    }
+  },
+);
 
 // Delete ledger (guard: no vouchers using it)
-app.delete("/companies/:companyId/ledgers/:ledgerId", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const ledgerId = new ObjectId(req.params.ledgerId);
-    const existingLedger = await Ledgers.findOne({ _id: ledgerId, companyId });
-    if (!existingLedger) {
-      return res.status(404).json({ message: "Ledger not found" });
-    }
-    if (existingLedger.isSystem) {
-      return res
-        .status(400)
-        .json({ message: "System ledgers cannot be deleted" });
-    }
-
-    const used = await Vouchers.countDocuments({
-      ...activeVoucherFilter({ companyId }),
-      "lines.ledgerId": ledgerId,
-    });
-
-    if (used > 0) {
-      return res.status(400).json({
-        message: "Ledger is used in vouchers. Cannot delete.",
+app.delete(
+  "/companies/:companyId/ledgers/:ledgerId",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const ledgerId = new ObjectId(req.params.ledgerId);
+      const existingLedger = await Ledgers.findOne({
+        _id: ledgerId,
+        companyId,
       });
-    }
+      if (!existingLedger) {
+        return res.status(404).json({ message: "Ledger not found" });
+      }
+      if (existingLedger.isSystem) {
+        return res
+          .status(400)
+          .json({ message: "System ledgers cannot be deleted" });
+      }
 
-    await Ledgers.deleteOne({ _id: ledgerId, companyId });
-    res.json({ message: "Ledger deleted" });
-  } catch (err) {
-    console.error("Error deleting ledger:", err);
-    res.status(500).json({ message: "Error deleting ledger" });
-  }
-});
+      const used = await Vouchers.countDocuments({
+        ...activeVoucherFilter({ companyId }),
+        "lines.ledgerId": ledgerId,
+      });
+
+      if (used > 0) {
+        return res.status(400).json({
+          message: "Ledger is used in vouchers. Cannot delete.",
+        });
+      }
+
+      await Ledgers.deleteOne({ _id: ledgerId, companyId });
+      res.json({ message: "Ledger deleted" });
+    } catch (err) {
+      console.error("Error deleting ledger:", err);
+      res.status(500).json({ message: "Error deleting ledger" });
+    }
+  },
+);
 
 // ---------- VOUCHER TYPES (CRUD / defaults are set on company create) ----------
 
@@ -5602,18 +5738,22 @@ app.get("/companies/:companyId/voucher-types", async (req, res) => {
 });
 
 // Create voucher type
-app.post("/companies/:companyId/voucher-types", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const { name, category = "ACCOUNTING" } = req.body;
-    const doc = { companyId, name, category, createdAt: new Date() };
-    const result = await VoucherTypes.insertOne(doc);
-    res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (err) {
-    console.error("Error creating voucher type:", err);
-    res.status(500).json({ message: "Error creating voucher type" });
-  }
-});
+app.post(
+  "/companies/:companyId/voucher-types",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const { name, category = "ACCOUNTING" } = req.body;
+      const doc = { companyId, name, category, createdAt: new Date() };
+      const result = await VoucherTypes.insertOne(doc);
+      res.status(201).json({ _id: result.insertedId, ...doc });
+    } catch (err) {
+      console.error("Error creating voucher type:", err);
+      res.status(500).json({ message: "Error creating voucher type" });
+    }
+  },
+);
 
 // Alter voucher type
 app.put(
@@ -5762,247 +5902,256 @@ app.get(
   },
 );
 
-app.post("/companies/:companyId/pos-vouchers", requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await ensureCompanyCoreMasters(companyId);
+app.post(
+  "/companies/:companyId/pos-vouchers",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await ensureCompanyCoreMasters(companyId);
 
-    const {
-      voucherTypeId,
-      number,
-      date,
-      narration,
-      customer,
-      salesMeta,
-      salesLedgerId,
-      payments = {},
-      discountType = "fixed",
-      discountValue = 0,
-      redeemedPoints = 0,
-      items = [],
-    } = req.body;
+      const {
+        voucherTypeId,
+        number,
+        date,
+        narration,
+        customer,
+        salesMeta,
+        salesLedgerId,
+        payments = {},
+        discountType = "fixed",
+        discountValue = 0,
+        redeemedPoints = 0,
+        items = [],
+      } = req.body;
 
-    const normalizedPhone = normalizePhone(customer?.phone);
-    if (!normalizedPhone) {
-      return res
-        .status(400)
-        .json({ message: "Customer phone number is required" });
-    }
-    if (!normalizeName(customer?.name)) {
-      return res.status(400).json({ message: "Customer name is required" });
-    }
-    if (!Array.isArray(items) || items.length === 0) {
-      return res
-        .status(400)
-        .json({ message: "At least one POS item is required" });
-    }
+      const normalizedPhone = normalizePhone(customer?.phone);
+      if (!normalizedPhone) {
+        return res
+          .status(400)
+          .json({ message: "Customer phone number is required" });
+      }
+      if (!normalizeName(customer?.name)) {
+        return res.status(400).json({ message: "Customer name is required" });
+      }
+      if (!Array.isArray(items) || items.length === 0) {
+        return res
+          .status(400)
+          .json({ message: "At least one POS item is required" });
+      }
 
-    const posVoucherType =
-      (voucherTypeId &&
+      const posVoucherType =
+        (voucherTypeId &&
+          (await VoucherTypes.findOne({
+            _id: new ObjectId(voucherTypeId),
+            companyId,
+          }))) ||
         (await VoucherTypes.findOne({
-          _id: new ObjectId(voucherTypeId),
           companyId,
-        }))) ||
-      (await VoucherTypes.findOne({
-        companyId,
-        name: { $regex: "^POS Voucher$", $options: "i" },
-      }));
+          name: { $regex: "^POS Voucher$", $options: "i" },
+        }));
 
-    if (!posVoucherType) {
-      return res.status(400).json({ message: "POS Voucher type not found" });
-    }
+      if (!posVoucherType) {
+        return res.status(400).json({ message: "POS Voucher type not found" });
+      }
 
-    const { salesLedger, cashLedger, bankLedger } =
-      await resolveDefaultPosLedgers(companyId);
-    const resolvedSalesLedger =
-      (salesLedgerId &&
-        (await Ledgers.findOne({
-          _id: new ObjectId(salesLedgerId),
-          companyId,
-        }))) ||
-      salesLedger;
+      const { salesLedger, cashLedger, bankLedger } =
+        await resolveDefaultPosLedgers(companyId);
+      const resolvedSalesLedger =
+        (salesLedgerId &&
+          (await Ledgers.findOne({
+            _id: new ObjectId(salesLedgerId),
+            companyId,
+          }))) ||
+        salesLedger;
 
-    if (!resolvedSalesLedger) {
-      return res
-        .status(400)
-        .json({ message: "Sales ledger is missing for this company" });
-    }
-
-    const itemIds = items
-      .filter((row) => row?.itemId && ObjectId.isValid(row.itemId))
-      .map((row) => new ObjectId(row.itemId));
-    const [itemDocs, groups, categories] = await Promise.all([
-      Items.find({ companyId, _id: { $in: itemIds } }).toArray(),
-      Groups.find({ companyId }).toArray(),
-      StockCategories.find({ companyId }).toArray(),
-    ]);
-    const itemMap = new Map(itemDocs.map((row) => [String(row._id), row]));
-    const groupMap = new Map(groups.map((row) => [String(row._id), row]));
-    const categoryMap = new Map(
-      categories.map((row) => [String(row._id), row]),
-    );
-
-    const inventoryLines = items
-      .filter((row) => row?.itemId && itemMap.has(String(row.itemId)))
-      .map((row) => {
-        const item = itemMap.get(String(row.itemId));
-        const qty = Number(row.qty || 0);
-        const rate = Number(row.rate || 0);
-        const mrpRate = Number(row.mrpRate || rate || 0);
-        const rowDiscountType = row.discountType || "percent";
-        const rowDiscountValue = Number(row.discountValue || 0);
-        const grossAmount = multiplyMoney(qty, rate);
-        const rowDiscountAmount =
-          rowDiscountType === "percent"
-            ? multiplyMoney(grossAmount, rowDiscountValue / 100)
-            : normalizeMoney(rowDiscountValue);
-        const amount = subtractMoney(grossAmount, rowDiscountAmount);
-        return {
-          itemId: item._id,
-          itemName: normalizeName(item.name),
-          qty,
-          billedQty: qty,
-          rate,
-          mrpRate,
-          amount,
-          discount: rowDiscountAmount,
-          discountType: rowDiscountType,
-          discountValue: rowDiscountValue,
-          groupId: item.groupId || null,
-          groupName: normalizeName(
-            row.groupName ||
-              groupMap.get(String(item.groupId || ""))?.name ||
-              "",
-          ),
-          stockCategoryId: item.stockCategoryId || null,
-          stockCategoryName: normalizeName(
-            row.stockCategoryName ||
-              categoryMap.get(String(item.stockCategoryId || ""))?.name ||
-              item.stockCategory ||
-              "",
-          ),
-          alias: normalizeName(item.alias || ""),
-          barcode: normalizeName(item.barcode || ""),
-        };
-      });
-
-    if (inventoryLines.length === 0) {
-      return res.status(400).json({ message: "No valid POS items found" });
-    }
-
-    const subtotal = inventoryLines.reduce(
-      (sum, row) => sumMoney(sum, row.amount || 0),
-      0,
-    );
-    const invoiceDiscount =
-      discountType === "percent"
-        ? multiplyMoney(subtotal, Number(discountValue || 0) / 100)
-        : normalizeMoney(discountValue || 0);
-    const rewardRedeemed = normalizeMoney(redeemedPoints || 0);
-    const totalAmount = subtractMoney(subtotal, invoiceDiscount, rewardRedeemed);
-
-    const cashAmount = normalizeMoney(payments.cash || 0);
-    const cardAmount = normalizeMoney(payments.card || 0);
-    const totalPaid = sumMoney(cashAmount, cardAmount);
-
-    if (!moneyEquals(totalPaid, totalAmount)) {
-      return res
-        .status(400)
-        .json({ message: "Payment total must match total amount payable" });
-    }
-
-    const rewardEarned = inventoryLines.reduce(
-      (sum, row) => sumMoney(sum, multiplyMoney(row.mrpRate || 0, row.qty || 0)),
-      0,
-    );
-
-    const existingCustomer = await Customers.findOne({
-      companyId,
-      phone: normalizedPhone,
-    });
-    if (rewardRedeemed > Number(existingCustomer?.rewardPoints || 0)) {
-      return res
-        .status(400)
-        .json({ message: "Customer does not have enough reward points" });
-    }
-
-    const customerDoc = await upsertPosCustomer(companyId, customer, {
-      rewardEarned,
-      rewardRedeemed,
-      totalAmount,
-      date,
-    });
-
-    const lines = [];
-    if (cashAmount > 0) {
-      if (!cashLedger) {
+      if (!resolvedSalesLedger) {
         return res
           .status(400)
-          .json({ message: "Cash ledger is missing for POS cash payment" });
+          .json({ message: "Sales ledger is missing for this company" });
       }
-      lines.push({ ledgerId: cashLedger._id, debit: cashAmount, credit: 0 });
-    }
-    if (cardAmount > 0) {
-      if (!bankLedger) {
-        return res
-          .status(400)
-          .json({ message: "Bank ledger is missing for POS card payment" });
-      }
-      lines.push({ ledgerId: bankLedger._id, debit: cardAmount, credit: 0 });
-    }
-    lines.push({
-      ledgerId: resolvedSalesLedger._id,
-      debit: 0,
-      credit: totalAmount,
-    });
 
-    const doc = {
-      companyId,
-      voucherName: "POS Voucher",
-      voucherTypeId: posVoucherType._id,
-      number,
-      date: new Date(date),
-      narration: narration || "",
-      lines,
-      inventoryLines,
-      customerId: customerDoc._id,
-      customerSnapshot: {
-        name: customerDoc.name,
-        phone: customerDoc.phone,
-        address: customerDoc.address || "",
-      },
-      posMeta: {
-        discountType,
-        discountValue: normalizeMoney(discountValue || 0),
-        invoiceDiscount,
+      const itemIds = items
+        .filter((row) => row?.itemId && ObjectId.isValid(row.itemId))
+        .map((row) => new ObjectId(row.itemId));
+      const [itemDocs, groups, categories] = await Promise.all([
+        Items.find({ companyId, _id: { $in: itemIds } }).toArray(),
+        Groups.find({ companyId }).toArray(),
+        StockCategories.find({ companyId }).toArray(),
+      ]);
+      const itemMap = new Map(itemDocs.map((row) => [String(row._id), row]));
+      const groupMap = new Map(groups.map((row) => [String(row._id), row]));
+      const categoryMap = new Map(
+        categories.map((row) => [String(row._id), row]),
+      );
+
+      const inventoryLines = items
+        .filter((row) => row?.itemId && itemMap.has(String(row.itemId)))
+        .map((row) => {
+          const item = itemMap.get(String(row.itemId));
+          const qty = Number(row.qty || 0);
+          const rate = Number(row.rate || 0);
+          const mrpRate = Number(row.mrpRate || rate || 0);
+          const rowDiscountType = row.discountType || "percent";
+          const rowDiscountValue = Number(row.discountValue || 0);
+          const grossAmount = multiplyMoney(qty, rate);
+          const rowDiscountAmount =
+            rowDiscountType === "percent"
+              ? multiplyMoney(grossAmount, rowDiscountValue / 100)
+              : normalizeMoney(rowDiscountValue);
+          const amount = subtractMoney(grossAmount, rowDiscountAmount);
+          return {
+            itemId: item._id,
+            itemName: normalizeName(item.name),
+            qty,
+            billedQty: qty,
+            rate,
+            mrpRate,
+            amount,
+            discount: rowDiscountAmount,
+            discountType: rowDiscountType,
+            discountValue: rowDiscountValue,
+            groupId: item.groupId || null,
+            groupName: normalizeName(
+              row.groupName ||
+                groupMap.get(String(item.groupId || ""))?.name ||
+                "",
+            ),
+            stockCategoryId: item.stockCategoryId || null,
+            stockCategoryName: normalizeName(
+              row.stockCategoryName ||
+                categoryMap.get(String(item.stockCategoryId || ""))?.name ||
+                item.stockCategory ||
+                "",
+            ),
+            alias: normalizeName(item.alias || ""),
+            barcode: normalizeName(item.barcode || ""),
+          };
+        });
+
+      if (inventoryLines.length === 0) {
+        return res.status(400).json({ message: "No valid POS items found" });
+      }
+
+      const subtotal = inventoryLines.reduce(
+        (sum, row) => sumMoney(sum, row.amount || 0),
+        0,
+      );
+      const invoiceDiscount =
+        discountType === "percent"
+          ? multiplyMoney(subtotal, Number(discountValue || 0) / 100)
+          : normalizeMoney(discountValue || 0);
+      const rewardRedeemed = normalizeMoney(redeemedPoints || 0);
+      const totalAmount = subtractMoney(
         subtotal,
-        totalAmount,
+        invoiceDiscount,
+        rewardRedeemed,
+      );
+
+      const cashAmount = normalizeMoney(payments.cash || 0);
+      const cardAmount = normalizeMoney(payments.card || 0);
+      const totalPaid = sumMoney(cashAmount, cardAmount);
+
+      if (!moneyEquals(totalPaid, totalAmount)) {
+        return res
+          .status(400)
+          .json({ message: "Payment total must match total amount payable" });
+      }
+
+      const rewardEarned = inventoryLines.reduce(
+        (sum, row) =>
+          sumMoney(sum, multiplyMoney(row.mrpRate || 0, row.qty || 0)),
+        0,
+      );
+
+      const existingCustomer = await Customers.findOne({
+        companyId,
+        phone: normalizedPhone,
+      });
+      if (rewardRedeemed > Number(existingCustomer?.rewardPoints || 0)) {
+        return res
+          .status(400)
+          .json({ message: "Customer does not have enough reward points" });
+      }
+
+      const customerDoc = await upsertPosCustomer(companyId, customer, {
         rewardEarned,
         rewardRedeemed,
-        cashAmount,
-        cardAmount,
-        cashTendered: normalizeMoney(payments.cashTendered || 0),
-        changeAmount: subtractMoney(payments.cashTendered || 0, cashAmount),
-      },
-      createdAt: new Date(),
-    };
+        totalAmount,
+        date,
+      });
 
-    const normalizedSalesMeta = normalizeSalesMeta(salesMeta);
-    if (normalizedSalesMeta) {
-      doc.salesMeta = normalizedSalesMeta;
+      const lines = [];
+      if (cashAmount > 0) {
+        if (!cashLedger) {
+          return res
+            .status(400)
+            .json({ message: "Cash ledger is missing for POS cash payment" });
+        }
+        lines.push({ ledgerId: cashLedger._id, debit: cashAmount, credit: 0 });
+      }
+      if (cardAmount > 0) {
+        if (!bankLedger) {
+          return res
+            .status(400)
+            .json({ message: "Bank ledger is missing for POS card payment" });
+        }
+        lines.push({ ledgerId: bankLedger._id, debit: cardAmount, credit: 0 });
+      }
+      lines.push({
+        ledgerId: resolvedSalesLedger._id,
+        debit: 0,
+        credit: totalAmount,
+      });
+
+      const doc = {
+        companyId,
+        voucherName: "POS Voucher",
+        voucherTypeId: posVoucherType._id,
+        number,
+        date: new Date(date),
+        narration: narration || "",
+        lines,
+        inventoryLines,
+        customerId: customerDoc._id,
+        customerSnapshot: {
+          name: customerDoc.name,
+          phone: customerDoc.phone,
+          address: customerDoc.address || "",
+        },
+        posMeta: {
+          discountType,
+          discountValue: normalizeMoney(discountValue || 0),
+          invoiceDiscount,
+          subtotal,
+          totalAmount,
+          rewardEarned,
+          rewardRedeemed,
+          cashAmount,
+          cardAmount,
+          cashTendered: normalizeMoney(payments.cashTendered || 0),
+          changeAmount: subtractMoney(payments.cashTendered || 0, cashAmount),
+        },
+        createdAt: new Date(),
+      };
+
+      const normalizedSalesMeta = normalizeSalesMeta(salesMeta);
+      if (normalizedSalesMeta) {
+        doc.salesMeta = normalizedSalesMeta;
+      }
+
+      const result = await Vouchers.insertOne(doc);
+      res
+        .status(201)
+        .json({ _id: result.insertedId, ...doc, customer: customerDoc });
+    } catch (err) {
+      console.error("Error creating POS voucher:", err);
+      res
+        .status(500)
+        .json({ message: err.message || "Error creating POS voucher" });
     }
-
-    const result = await Vouchers.insertOne(doc);
-    res
-      .status(201)
-      .json({ _id: result.insertedId, ...doc, customer: customerDoc });
-  } catch (err) {
-    console.error("Error creating POS voucher:", err);
-    res
-      .status(500)
-      .json({ message: err.message || "Error creating POS voucher" });
-  }
-});
+  },
+);
 
 app.get(
   "/companies/:companyId/reports/customer-behaviour/overview",
@@ -6409,338 +6558,66 @@ app.get("/companies/:companyId/vouchers/:voucherId", async (req, res, next) => {
 
 // Create voucher (like Tally: one header + many lines)
 // CREATE PURCHASE / SALES / INVENTORY VOUCHER
-app.post("/companies/:companyId/vouchers", requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const actor = getRequestActor(req);
+app.post(
+  "/companies/:companyId/vouchers",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const actor = getRequestActor(req);
 
-    const {
-      voucherTypeId,
-      voucherName,
-      number,
-      date,
-      narration,
-      commercialMeta,
-      salesMeta,
-      manufacturingMeta,
-      lines,
-      inventoryLines,
-    } = req.body;
+      const {
+        voucherTypeId,
+        voucherName,
+        number,
+        date,
+        narration,
+        commercialMeta,
+        salesMeta,
+        manufacturingMeta,
+        lines,
+        inventoryLines,
+      } = req.body;
 
-    const voucherType = await VoucherTypes.findOne({
-      _id: new ObjectId(voucherTypeId),
-      companyId,
-    });
-    if (!voucherType) {
-      return res.status(400).json({ message: "Voucher type not found" });
-    }
-
-    // Validate accounting lines
-    const validLines = Array.isArray(lines)
-      ? lines.filter((line) => line?.ledgerId)
-      : [];
-    if (voucherType.category !== "INVENTORY" && validLines.length < 2) {
-      return res
-        .status(400)
-        .json({ message: "Voucher must have at least 2 accounting lines" });
-    }
-
-    // Validate inventory lines
-    const normalizedInventory = (inventoryLines || [])
-      .filter((line) => line?.itemId)
-      .map(normalizeInventoryLinePayload);
-
-    let totalDr = 0;
-    let totalCr = 0;
-
-    const normalizedLines = validLines.map((l) => {
-      const debit = Number(l.debit) || 0;
-      const credit = Number(l.credit) || 0;
-      totalDr += debit;
-      totalCr += credit;
-
-      return {
-        ledgerId: new ObjectId(l.ledgerId),
-        debit,
-        credit,
-      };
-    });
-
-    if (normalizedLines.length > 0) {
-      const ledgerIds = normalizedLines.map((line) => line.ledgerId);
-      const ownedLedgers = await Ledgers.find({
-        companyId,
-        _id: { $in: ledgerIds },
-      })
-        .project({ _id: 1 })
-        .toArray();
-      if (ownedLedgers.length !== ledgerIds.length) {
-        return res.status(400).json({
-          message: "One or more selected ledgers do not belong to this company",
-        });
-      }
-    }
-
-    if (
-      voucherType.category !== "INVENTORY" &&
-      totalDr.toFixed(2) !== totalCr.toFixed(2)
-    ) {
-      return res.status(400).json({
-        message: "Total Debit and Credit must be equal",
-      });
-    }
-
-    const createdStamp = buildAuditStamp(actor);
-    const doc = {
-      companyId,
-      voucherName: normalizeName(voucherName || voucherType.name),
-      voucherTypeId: new ObjectId(voucherTypeId),
-      number,
-      date: new Date(date),
-      narration: narration || "",
-      lines: voucherType.category === "INVENTORY" ? [] : normalizedLines,
-      inventoryLines: normalizedInventory,
-      createdAt: createdStamp.at,
-      updatedAt: createdStamp.at,
-      createdBy: createdStamp.by,
-      updatedBy: createdStamp.by,
-      isDeleted: false,
-    };
-
-    if (commercialMeta) {
-      doc.commercialMeta = {
-        subtotal: normalizeMoney(commercialMeta.subtotal || 0),
-        lineDiscountTotal: normalizeMoney(
-          commercialMeta.lineDiscountTotal || 0,
-        ),
-        invoiceDiscount: normalizeMoney(commercialMeta.invoiceDiscount || 0),
-        additionalCharges: normalizeMoney(
-          commercialMeta.additionalCharges || 0,
-        ),
-        additionalAdjustments: Array.isArray(commercialMeta.additionalAdjustments)
-          ? commercialMeta.additionalAdjustments
-              .filter((row) => row?.ledgerId && ObjectId.isValid(row.ledgerId))
-              .map((row) => ({
-                ledgerId: new ObjectId(row.ledgerId),
-                ledgerName: normalizeName(row.ledgerName || ""),
-                nature: normalizeName(row.nature || ""),
-                mode: normalizeName(row.mode || "fixed"),
-                value: normalizeMoney(row.value || 0),
-                amount: normalizeMoney(row.amount || 0),
-              }))
-          : [],
-        additionalExpenseLedgerId:
-          commercialMeta.additionalExpenseLedgerId &&
-          ObjectId.isValid(commercialMeta.additionalExpenseLedgerId)
-            ? new ObjectId(commercialMeta.additionalExpenseLedgerId)
-            : null,
-        additionalExpenseMode: normalizeName(
-          commercialMeta.additionalExpenseMode || "fixed",
-        ),
-        additionalExpenseValue: normalizeMoney(
-          commercialMeta.additionalExpenseValue || 0,
-        ),
-        additionalExpenseAmount: normalizeMoney(
-          commercialMeta.additionalExpenseAmount || 0,
-        ),
-        additionalIncomeLedgerId:
-          commercialMeta.additionalIncomeLedgerId &&
-          ObjectId.isValid(commercialMeta.additionalIncomeLedgerId)
-            ? new ObjectId(commercialMeta.additionalIncomeLedgerId)
-            : null,
-        additionalIncomeMode: normalizeName(
-          commercialMeta.additionalIncomeMode || "fixed",
-        ),
-        additionalIncomeValue: normalizeMoney(
-          commercialMeta.additionalIncomeValue || 0,
-        ),
-        additionalIncomeAmount: normalizeMoney(
-          commercialMeta.additionalIncomeAmount || 0,
-        ),
-        totalAmount: normalizeMoney(commercialMeta.totalAmount || 0),
-      };
-    }
-
-    if (salesMeta) {
-      const normalizedSalesMeta = normalizeSalesMeta(salesMeta);
-      if (normalizedSalesMeta) {
-        doc.salesMeta = normalizedSalesMeta;
-      }
-    }
-
-    if (manufacturingMeta) {
-      doc.manufacturingMeta = normalizeManufacturingMeta(manufacturingMeta);
-    }
-
-    const result = await Vouchers.insertOne(doc);
-    await logAuditEvent({
-      companyId,
-      entityType: "voucher",
-      entityId: result.insertedId,
-      action: "create",
-      actor,
-      after: { ...doc, _id: result.insertedId },
-    });
-    res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (err) {
-    console.error("Error creating voucher:", err);
-    res.status(500).json({ message: "Error creating voucher" });
-  }
-});
-
-// Alter voucher
-app.put("/companies/:companyId/vouchers/:voucherId", requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const voucherId = new ObjectId(req.params.voucherId);
-    const actor = getRequestActor(req);
-    const existingVoucher = await Vouchers.findOne(
-      activeVoucherFilter({
-        _id: voucherId,
-        companyId,
-      }),
-    );
-    if (!existingVoucher) {
-      return res.status(404).json({ message: "Voucher not found" });
-    }
-    const {
-      voucherTypeId,
-      voucherName,
-      number,
-      date,
-      narration,
-      referenceNo,
-      customerId,
-      customerSnapshot,
-      commercialMeta,
-      posMeta,
-      salesMeta,
-      manufacturingMeta,
-      lines,
-      inventoryLines,
-    } = req.body;
-
-    const update = { $set: {}, $unset: {} };
-    let voucherType = null;
-
-    if (voucherTypeId) {
-      update.$set.voucherTypeId = new ObjectId(voucherTypeId);
-      voucherType = await VoucherTypes.findOne({
+      const voucherType = await VoucherTypes.findOne({
         _id: new ObjectId(voucherTypeId),
         companyId,
       });
-    }
-    if (voucherName) update.$set.voucherName = normalizeName(voucherName);
-    if (number !== undefined) update.$set.number = number;
-    if (date) update.$set.date = new Date(date);
-    if (narration !== undefined) update.$set.narration = narration;
-    if (referenceNo !== undefined) update.$set.referenceNo = referenceNo;
-    if (customerId && ObjectId.isValid(customerId))
-      update.$set.customerId = new ObjectId(customerId);
-    if (customerSnapshot) {
-      update.$set.customerSnapshot = {
-        name: normalizeName(customerSnapshot.name || ""),
-        phone: normalizePhone(customerSnapshot.phone || ""),
-        address: normalizeName(customerSnapshot.address || ""),
-      };
-    }
-    if (commercialMeta) {
-      update.$set.commercialMeta = {
-        subtotal: normalizeMoney(commercialMeta.subtotal || 0),
-        lineDiscountTotal: normalizeMoney(
-          commercialMeta.lineDiscountTotal || 0,
-        ),
-        invoiceDiscount: normalizeMoney(commercialMeta.invoiceDiscount || 0),
-        additionalCharges: normalizeMoney(
-          commercialMeta.additionalCharges || 0,
-        ),
-        additionalAdjustments: Array.isArray(commercialMeta.additionalAdjustments)
-          ? commercialMeta.additionalAdjustments
-              .filter((row) => row?.ledgerId && ObjectId.isValid(row.ledgerId))
-              .map((row) => ({
-                ledgerId: new ObjectId(row.ledgerId),
-                ledgerName: normalizeName(row.ledgerName || ""),
-                nature: normalizeName(row.nature || ""),
-                mode: normalizeName(row.mode || "fixed"),
-                value: normalizeMoney(row.value || 0),
-                amount: normalizeMoney(row.amount || 0),
-              }))
-          : [],
-        additionalExpenseLedgerId:
-          commercialMeta.additionalExpenseLedgerId &&
-          ObjectId.isValid(commercialMeta.additionalExpenseLedgerId)
-            ? new ObjectId(commercialMeta.additionalExpenseLedgerId)
-            : null,
-        additionalExpenseMode: normalizeName(
-          commercialMeta.additionalExpenseMode || "fixed",
-        ),
-        additionalExpenseValue: normalizeMoney(
-          commercialMeta.additionalExpenseValue || 0,
-        ),
-        additionalExpenseAmount: normalizeMoney(
-          commercialMeta.additionalExpenseAmount || 0,
-        ),
-        additionalIncomeLedgerId:
-          commercialMeta.additionalIncomeLedgerId &&
-          ObjectId.isValid(commercialMeta.additionalIncomeLedgerId)
-            ? new ObjectId(commercialMeta.additionalIncomeLedgerId)
-            : null,
-        additionalIncomeMode: normalizeName(
-          commercialMeta.additionalIncomeMode || "fixed",
-        ),
-        additionalIncomeValue: normalizeMoney(
-          commercialMeta.additionalIncomeValue || 0,
-        ),
-        additionalIncomeAmount: normalizeMoney(
-          commercialMeta.additionalIncomeAmount || 0,
-        ),
-        totalAmount: normalizeMoney(commercialMeta.totalAmount || 0),
-      };
-    }
-    if (posMeta) {
-      update.$set.posMeta = {
-        discountType: posMeta.discountType || "fixed",
-        discountValue: normalizeMoney(posMeta.discountValue || 0),
-        invoiceDiscount: normalizeMoney(posMeta.invoiceDiscount || 0),
-        subtotal: normalizeMoney(posMeta.subtotal || 0),
-        totalAmount: normalizeMoney(posMeta.totalAmount || 0),
-        rewardEarned: normalizeMoney(posMeta.rewardEarned || 0),
-        rewardRedeemed: normalizeMoney(posMeta.rewardRedeemed || 0),
-        cashAmount: normalizeMoney(posMeta.cashAmount || 0),
-        cardAmount: normalizeMoney(posMeta.cardAmount || 0),
-        cashTendered: normalizeMoney(posMeta.cashTendered || 0),
-        changeAmount: normalizeMoney(posMeta.changeAmount || 0),
-      };
-    }
-    if (salesMeta !== undefined) {
-      const normalizedSalesMeta = normalizeSalesMeta(salesMeta);
-      if (normalizedSalesMeta) {
-        update.$set.salesMeta = normalizedSalesMeta;
-        delete update.$unset.salesMeta;
-      } else {
-        update.$unset.salesMeta = "";
+      if (!voucherType) {
+        return res.status(400).json({ message: "Voucher type not found" });
       }
-    }
-    if (manufacturingMeta) {
-      update.$set.manufacturingMeta =
-        normalizeManufacturingMeta(manufacturingMeta);
-    }
 
-    if (Array.isArray(lines)) {
-      const validLines = lines.filter((line) => line?.ledgerId);
+      // Validate accounting lines
+      const validLines = Array.isArray(lines)
+        ? lines.filter((line) => line?.ledgerId)
+        : [];
+      if (voucherType.category !== "INVENTORY" && validLines.length < 2) {
+        return res
+          .status(400)
+          .json({ message: "Voucher must have at least 2 accounting lines" });
+      }
+
+      // Validate inventory lines
+      const normalizedInventory = (inventoryLines || [])
+        .filter((line) => line?.itemId)
+        .map(normalizeInventoryLinePayload);
+
       let totalDr = 0;
       let totalCr = 0;
+
       const normalizedLines = validLines.map((l) => {
         const debit = Number(l.debit) || 0;
         const credit = Number(l.credit) || 0;
         totalDr += debit;
         totalCr += credit;
+
         return {
           ledgerId: new ObjectId(l.ledgerId),
           debit,
           credit,
         };
       });
+
       if (normalizedLines.length > 0) {
         const ledgerIds = normalizedLines.map((line) => line.ledgerId);
         const ownedLedgers = await Ledgers.find({
@@ -6756,117 +6633,410 @@ app.put("/companies/:companyId/vouchers/:voucherId", requireCompanyWriteAccess(R
           });
         }
       }
+
       if (
-        voucherType?.category !== "INVENTORY" &&
+        voucherType.category !== "INVENTORY" &&
         totalDr.toFixed(2) !== totalCr.toFixed(2)
       ) {
-        return res
-          .status(400)
-          .json({ message: "Total Debit and Credit must be equal" });
+        return res.status(400).json({
+          message: "Total Debit and Credit must be equal",
+        });
       }
-      update.$set.lines =
-        voucherType?.category === "INVENTORY" ? [] : normalizedLines;
-    }
 
-    if (Array.isArray(inventoryLines)) {
-      update.$set.inventoryLines = inventoryLines
-        .filter((line) => line?.itemId)
-        .map(normalizeInventoryLinePayload);
-    }
-
-    if (Object.keys(update.$unset).length === 0) {
-      delete update.$unset;
-    }
-
-    const updatedStamp = buildAuditStamp(actor);
-    update.$set.updatedAt = updatedStamp.at;
-    update.$set.updatedBy = updatedStamp.by;
-
-    await Vouchers.updateOne(
-      activeVoucherFilter({ _id: voucherId, companyId }),
-      update,
-    );
-    const updated = await Vouchers.findOne(
-      activeVoucherFilter({ _id: voucherId, companyId }),
-    );
-    if (
-      nameKey(existingVoucher.voucherName || "") === "pos voucher" ||
-      nameKey(updated?.voucherName || "") === "pos voucher"
-    ) {
-      await rebuildPosCustomerFromVouchers(
+      const createdStamp = buildAuditStamp(actor);
+      const doc = {
         companyId,
-        existingVoucher.customerSnapshot?.phone,
-      );
-      const nextPhone = updated?.customerSnapshot?.phone;
-      if (
-        normalizePhone(nextPhone) !==
-        normalizePhone(existingVoucher.customerSnapshot?.phone)
-      ) {
-        await rebuildPosCustomerFromVouchers(companyId, nextPhone);
+        voucherName: normalizeName(voucherName || voucherType.name),
+        voucherTypeId: new ObjectId(voucherTypeId),
+        number,
+        date: new Date(date),
+        narration: narration || "",
+        lines: voucherType.category === "INVENTORY" ? [] : normalizedLines,
+        inventoryLines: normalizedInventory,
+        createdAt: createdStamp.at,
+        updatedAt: createdStamp.at,
+        createdBy: createdStamp.by,
+        updatedBy: createdStamp.by,
+        isDeleted: false,
+      };
+
+      if (commercialMeta) {
+        doc.commercialMeta = {
+          subtotal: normalizeMoney(commercialMeta.subtotal || 0),
+          lineDiscountTotal: normalizeMoney(
+            commercialMeta.lineDiscountTotal || 0,
+          ),
+          invoiceDiscount: normalizeMoney(commercialMeta.invoiceDiscount || 0),
+          additionalCharges: normalizeMoney(
+            commercialMeta.additionalCharges || 0,
+          ),
+          additionalAdjustments: Array.isArray(
+            commercialMeta.additionalAdjustments,
+          )
+            ? commercialMeta.additionalAdjustments
+                .filter(
+                  (row) => row?.ledgerId && ObjectId.isValid(row.ledgerId),
+                )
+                .map((row) => ({
+                  ledgerId: new ObjectId(row.ledgerId),
+                  ledgerName: normalizeName(row.ledgerName || ""),
+                  nature: normalizeName(row.nature || ""),
+                  mode: normalizeName(row.mode || "fixed"),
+                  value: normalizeMoney(row.value || 0),
+                  amount: normalizeMoney(row.amount || 0),
+                }))
+            : [],
+          additionalExpenseLedgerId:
+            commercialMeta.additionalExpenseLedgerId &&
+            ObjectId.isValid(commercialMeta.additionalExpenseLedgerId)
+              ? new ObjectId(commercialMeta.additionalExpenseLedgerId)
+              : null,
+          additionalExpenseMode: normalizeName(
+            commercialMeta.additionalExpenseMode || "fixed",
+          ),
+          additionalExpenseValue: normalizeMoney(
+            commercialMeta.additionalExpenseValue || 0,
+          ),
+          additionalExpenseAmount: normalizeMoney(
+            commercialMeta.additionalExpenseAmount || 0,
+          ),
+          additionalIncomeLedgerId:
+            commercialMeta.additionalIncomeLedgerId &&
+            ObjectId.isValid(commercialMeta.additionalIncomeLedgerId)
+              ? new ObjectId(commercialMeta.additionalIncomeLedgerId)
+              : null,
+          additionalIncomeMode: normalizeName(
+            commercialMeta.additionalIncomeMode || "fixed",
+          ),
+          additionalIncomeValue: normalizeMoney(
+            commercialMeta.additionalIncomeValue || 0,
+          ),
+          additionalIncomeAmount: normalizeMoney(
+            commercialMeta.additionalIncomeAmount || 0,
+          ),
+          totalAmount: normalizeMoney(commercialMeta.totalAmount || 0),
+        };
       }
+
+      if (salesMeta) {
+        const normalizedSalesMeta = normalizeSalesMeta(salesMeta);
+        if (normalizedSalesMeta) {
+          doc.salesMeta = normalizedSalesMeta;
+        }
+      }
+
+      if (manufacturingMeta) {
+        doc.manufacturingMeta = normalizeManufacturingMeta(manufacturingMeta);
+      }
+
+      const result = await Vouchers.insertOne(doc);
+      await logAuditEvent({
+        companyId,
+        entityType: "voucher",
+        entityId: result.insertedId,
+        action: "create",
+        actor,
+        after: { ...doc, _id: result.insertedId },
+      });
+      res.status(201).json({ _id: result.insertedId, ...doc });
+    } catch (err) {
+      console.error("Error creating voucher:", err);
+      res.status(500).json({ message: "Error creating voucher" });
     }
-    await logAuditEvent({
-      companyId,
-      entityType: "voucher",
-      entityId: voucherId,
-      action: "update",
-      actor,
-      before: existingVoucher,
-      after: updated,
-    });
-    res.json(updated);
-  } catch (err) {
-    console.error("Error updating voucher:", err);
-    res.status(500).json({ message: "Error updating voucher" });
-  }
-});
+  },
+);
+
+// Alter voucher
+app.put(
+  "/companies/:companyId/vouchers/:voucherId",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const voucherId = new ObjectId(req.params.voucherId);
+      const actor = getRequestActor(req);
+      const existingVoucher = await Vouchers.findOne(
+        activeVoucherFilter({
+          _id: voucherId,
+          companyId,
+        }),
+      );
+      if (!existingVoucher) {
+        return res.status(404).json({ message: "Voucher not found" });
+      }
+      const {
+        voucherTypeId,
+        voucherName,
+        number,
+        date,
+        narration,
+        referenceNo,
+        customerId,
+        customerSnapshot,
+        commercialMeta,
+        posMeta,
+        salesMeta,
+        manufacturingMeta,
+        lines,
+        inventoryLines,
+      } = req.body;
+
+      const update = { $set: {}, $unset: {} };
+      let voucherType = null;
+
+      if (voucherTypeId) {
+        update.$set.voucherTypeId = new ObjectId(voucherTypeId);
+        voucherType = await VoucherTypes.findOne({
+          _id: new ObjectId(voucherTypeId),
+          companyId,
+        });
+      }
+      if (voucherName) update.$set.voucherName = normalizeName(voucherName);
+      if (number !== undefined) update.$set.number = number;
+      if (date) update.$set.date = new Date(date);
+      if (narration !== undefined) update.$set.narration = narration;
+      if (referenceNo !== undefined) update.$set.referenceNo = referenceNo;
+      if (customerId && ObjectId.isValid(customerId))
+        update.$set.customerId = new ObjectId(customerId);
+      if (customerSnapshot) {
+        update.$set.customerSnapshot = {
+          name: normalizeName(customerSnapshot.name || ""),
+          phone: normalizePhone(customerSnapshot.phone || ""),
+          address: normalizeName(customerSnapshot.address || ""),
+        };
+      }
+      if (commercialMeta) {
+        update.$set.commercialMeta = {
+          subtotal: normalizeMoney(commercialMeta.subtotal || 0),
+          lineDiscountTotal: normalizeMoney(
+            commercialMeta.lineDiscountTotal || 0,
+          ),
+          invoiceDiscount: normalizeMoney(commercialMeta.invoiceDiscount || 0),
+          additionalCharges: normalizeMoney(
+            commercialMeta.additionalCharges || 0,
+          ),
+          additionalAdjustments: Array.isArray(
+            commercialMeta.additionalAdjustments,
+          )
+            ? commercialMeta.additionalAdjustments
+                .filter(
+                  (row) => row?.ledgerId && ObjectId.isValid(row.ledgerId),
+                )
+                .map((row) => ({
+                  ledgerId: new ObjectId(row.ledgerId),
+                  ledgerName: normalizeName(row.ledgerName || ""),
+                  nature: normalizeName(row.nature || ""),
+                  mode: normalizeName(row.mode || "fixed"),
+                  value: normalizeMoney(row.value || 0),
+                  amount: normalizeMoney(row.amount || 0),
+                }))
+            : [],
+          additionalExpenseLedgerId:
+            commercialMeta.additionalExpenseLedgerId &&
+            ObjectId.isValid(commercialMeta.additionalExpenseLedgerId)
+              ? new ObjectId(commercialMeta.additionalExpenseLedgerId)
+              : null,
+          additionalExpenseMode: normalizeName(
+            commercialMeta.additionalExpenseMode || "fixed",
+          ),
+          additionalExpenseValue: normalizeMoney(
+            commercialMeta.additionalExpenseValue || 0,
+          ),
+          additionalExpenseAmount: normalizeMoney(
+            commercialMeta.additionalExpenseAmount || 0,
+          ),
+          additionalIncomeLedgerId:
+            commercialMeta.additionalIncomeLedgerId &&
+            ObjectId.isValid(commercialMeta.additionalIncomeLedgerId)
+              ? new ObjectId(commercialMeta.additionalIncomeLedgerId)
+              : null,
+          additionalIncomeMode: normalizeName(
+            commercialMeta.additionalIncomeMode || "fixed",
+          ),
+          additionalIncomeValue: normalizeMoney(
+            commercialMeta.additionalIncomeValue || 0,
+          ),
+          additionalIncomeAmount: normalizeMoney(
+            commercialMeta.additionalIncomeAmount || 0,
+          ),
+          totalAmount: normalizeMoney(commercialMeta.totalAmount || 0),
+        };
+      }
+      if (posMeta) {
+        update.$set.posMeta = {
+          discountType: posMeta.discountType || "fixed",
+          discountValue: normalizeMoney(posMeta.discountValue || 0),
+          invoiceDiscount: normalizeMoney(posMeta.invoiceDiscount || 0),
+          subtotal: normalizeMoney(posMeta.subtotal || 0),
+          totalAmount: normalizeMoney(posMeta.totalAmount || 0),
+          rewardEarned: normalizeMoney(posMeta.rewardEarned || 0),
+          rewardRedeemed: normalizeMoney(posMeta.rewardRedeemed || 0),
+          cashAmount: normalizeMoney(posMeta.cashAmount || 0),
+          cardAmount: normalizeMoney(posMeta.cardAmount || 0),
+          cashTendered: normalizeMoney(posMeta.cashTendered || 0),
+          changeAmount: normalizeMoney(posMeta.changeAmount || 0),
+        };
+      }
+      if (salesMeta !== undefined) {
+        const normalizedSalesMeta = normalizeSalesMeta(salesMeta);
+        if (normalizedSalesMeta) {
+          update.$set.salesMeta = normalizedSalesMeta;
+          delete update.$unset.salesMeta;
+        } else {
+          update.$unset.salesMeta = "";
+        }
+      }
+      if (manufacturingMeta) {
+        update.$set.manufacturingMeta =
+          normalizeManufacturingMeta(manufacturingMeta);
+      }
+
+      if (Array.isArray(lines)) {
+        const validLines = lines.filter((line) => line?.ledgerId);
+        let totalDr = 0;
+        let totalCr = 0;
+        const normalizedLines = validLines.map((l) => {
+          const debit = Number(l.debit) || 0;
+          const credit = Number(l.credit) || 0;
+          totalDr += debit;
+          totalCr += credit;
+          return {
+            ledgerId: new ObjectId(l.ledgerId),
+            debit,
+            credit,
+          };
+        });
+        if (normalizedLines.length > 0) {
+          const ledgerIds = normalizedLines.map((line) => line.ledgerId);
+          const ownedLedgers = await Ledgers.find({
+            companyId,
+            _id: { $in: ledgerIds },
+          })
+            .project({ _id: 1 })
+            .toArray();
+          if (ownedLedgers.length !== ledgerIds.length) {
+            return res.status(400).json({
+              message:
+                "One or more selected ledgers do not belong to this company",
+            });
+          }
+        }
+        if (
+          voucherType?.category !== "INVENTORY" &&
+          totalDr.toFixed(2) !== totalCr.toFixed(2)
+        ) {
+          return res
+            .status(400)
+            .json({ message: "Total Debit and Credit must be equal" });
+        }
+        update.$set.lines =
+          voucherType?.category === "INVENTORY" ? [] : normalizedLines;
+      }
+
+      if (Array.isArray(inventoryLines)) {
+        update.$set.inventoryLines = inventoryLines
+          .filter((line) => line?.itemId)
+          .map(normalizeInventoryLinePayload);
+      }
+
+      if (Object.keys(update.$unset).length === 0) {
+        delete update.$unset;
+      }
+
+      const updatedStamp = buildAuditStamp(actor);
+      update.$set.updatedAt = updatedStamp.at;
+      update.$set.updatedBy = updatedStamp.by;
+
+      await Vouchers.updateOne(
+        activeVoucherFilter({ _id: voucherId, companyId }),
+        update,
+      );
+      const updated = await Vouchers.findOne(
+        activeVoucherFilter({ _id: voucherId, companyId }),
+      );
+      if (
+        nameKey(existingVoucher.voucherName || "") === "pos voucher" ||
+        nameKey(updated?.voucherName || "") === "pos voucher"
+      ) {
+        await rebuildPosCustomerFromVouchers(
+          companyId,
+          existingVoucher.customerSnapshot?.phone,
+        );
+        const nextPhone = updated?.customerSnapshot?.phone;
+        if (
+          normalizePhone(nextPhone) !==
+          normalizePhone(existingVoucher.customerSnapshot?.phone)
+        ) {
+          await rebuildPosCustomerFromVouchers(companyId, nextPhone);
+        }
+      }
+      await logAuditEvent({
+        companyId,
+        entityType: "voucher",
+        entityId: voucherId,
+        action: "update",
+        actor,
+        before: existingVoucher,
+        after: updated,
+      });
+      res.json(updated);
+    } catch (err) {
+      console.error("Error updating voucher:", err);
+      res.status(500).json({ message: "Error updating voucher" });
+    }
+  },
+);
 
 // Delete voucher
-app.delete("/companies/:companyId/vouchers/:voucherId", requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const voucherId = new ObjectId(req.params.voucherId);
-    const actor = getRequestActor(req);
-    const existingVoucher = await Vouchers.findOne(
-      activeVoucherFilter({ _id: voucherId, companyId }),
-    );
-    if (!existingVoucher) {
-      return res.status(404).json({ message: "Voucher not found" });
-    }
+app.delete(
+  "/companies/:companyId/vouchers/:voucherId",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingVouchers),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const voucherId = new ObjectId(req.params.voucherId);
+      const actor = getRequestActor(req);
+      const existingVoucher = await Vouchers.findOne(
+        activeVoucherFilter({ _id: voucherId, companyId }),
+      );
+      if (!existingVoucher) {
+        return res.status(404).json({ message: "Voucher not found" });
+      }
 
-    const deletedStamp = buildAuditStamp(actor);
-    await Vouchers.updateOne(
-      activeVoucherFilter({ _id: voucherId, companyId }),
-      {
-        $set: {
+      const deletedStamp = buildAuditStamp(actor);
+      await Vouchers.updateOne(
+        activeVoucherFilter({ _id: voucherId, companyId }),
+        {
+          $set: {
+            isDeleted: true,
+            deletedAt: deletedStamp.at,
+            deletedBy: deletedStamp.by,
+            updatedAt: deletedStamp.at,
+            updatedBy: deletedStamp.by,
+          },
+        },
+      );
+      await logAuditEvent({
+        companyId,
+        entityType: "voucher",
+        entityId: voucherId,
+        action: "delete",
+        actor,
+        before: existingVoucher,
+        after: {
+          ...existingVoucher,
           isDeleted: true,
           deletedAt: deletedStamp.at,
           deletedBy: deletedStamp.by,
-          updatedAt: deletedStamp.at,
-          updatedBy: deletedStamp.by,
         },
-      },
-    );
-    await logAuditEvent({
-      companyId,
-      entityType: "voucher",
-      entityId: voucherId,
-      action: "delete",
-      actor,
-      before: existingVoucher,
-      after: {
-        ...existingVoucher,
-        isDeleted: true,
-        deletedAt: deletedStamp.at,
-        deletedBy: deletedStamp.by,
-      },
-    });
-    res.json({ message: "Voucher deleted" });
-  } catch (err) {
-    console.error("Error deleting voucher:", err);
-    res.status(500).json({ message: "Error deleting voucher" });
-  }
-});
+      });
+      res.json({ message: "Voucher deleted" });
+    } catch (err) {
+      console.error("Error deleting voucher:", err);
+      res.status(500).json({ message: "Error deleting voucher" });
+    }
+  },
+);
 
 // Get next voucher number for a voucher type
 app.get("/companies/:companyId/vouchers/next-number", async (req, res) => {
@@ -7102,246 +7272,267 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
   }
 });
 
-app.get("/companies/:companyId/reports/profit-loss-drilldown", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const fromDate = safeDate(req.query.from);
-    const toDate = safeDate(req.query.to);
+app.get(
+  "/companies/:companyId/reports/profit-loss-drilldown",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const fromDate = safeDate(req.query.from);
+      const toDate = safeDate(req.query.to);
 
-    const [groups, vouchers, ledgers, stockSummary] = await Promise.all([
-      Groups.find({ companyId }).toArray(),
-      Vouchers.find(activeVoucherFilter({ companyId })).toArray(),
-      Ledgers.aggregate([
-        { $match: { companyId } },
-        {
-          $lookup: {
-            from: "groups",
-            localField: "groupId",
-            foreignField: "_id",
-            as: "group",
+      const [groups, vouchers, ledgers, stockSummary] = await Promise.all([
+        Groups.find({ companyId }).toArray(),
+        Vouchers.find(activeVoucherFilter({ companyId })).toArray(),
+        Ledgers.aggregate([
+          { $match: { companyId } },
+          {
+            $lookup: {
+              from: "groups",
+              localField: "groupId",
+              foreignField: "_id",
+              as: "group",
+            },
           },
-        },
-        { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
-      ]).toArray(),
-      buildStockSummary(companyId, fromDate, toDate),
-    ]);
+          { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
+        ]).toArray(),
+        buildStockSummary(companyId, fromDate, toDate),
+      ]);
 
-    const groupMap = new Map(groups.map((group) => [String(group._id), group]));
-    const ledgerMap = new Map(ledgers.map((ledger) => [String(ledger._id), ledger]));
-    const periodVouchers = vouchers
-      .filter((voucher) => {
-        const voucherDate = voucher?.date ? new Date(voucher.date) : null;
-        return (
-          (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
-          (!toDate || (voucherDate && voucherDate <= toDate))
-        );
-      })
-      .sort((left, right) => {
-        const leftTime = left?.date ? new Date(left.date).getTime() : 0;
-        const rightTime = right?.date ? new Date(right.date).getTime() : 0;
-        return leftTime - rightTime;
-      });
+      const groupMap = new Map(
+        groups.map((group) => [String(group._id), group]),
+      );
+      const ledgerMap = new Map(
+        ledgers.map((ledger) => [String(ledger._id), ledger]),
+      );
+      const periodVouchers = vouchers
+        .filter((voucher) => {
+          const voucherDate = voucher?.date ? new Date(voucher.date) : null;
+          return (
+            (!fromDate || (voucherDate && voucherDate >= fromDate)) &&
+            (!toDate || (voucherDate && voucherDate <= toDate))
+          );
+        })
+        .sort((left, right) => {
+          const leftTime = left?.date ? new Date(left.date).getTime() : 0;
+          const rightTime = right?.date ? new Date(right.date).getTime() : 0;
+          return leftTime - rightTime;
+        });
 
-    const entries = [];
-    const openingStock = normalizeMoney(
-      (stockSummary.rows || []).reduce(
-        (sum, row) => sum + Number(row.openingValue || 0),
-        0,
-      ),
-    );
-    const closingStock = normalizeMoney(
-      (stockSummary.rows || []).reduce(
-        (sum, row) => sum + Number(row.closingValue || 0),
-        0,
-      ),
-    );
+      const entries = [];
+      const openingStock = normalizeMoney(
+        (stockSummary.rows || []).reduce(
+          (sum, row) => sum + Number(row.openingValue || 0),
+          0,
+        ),
+      );
+      const closingStock = normalizeMoney(
+        (stockSummary.rows || []).reduce(
+          (sum, row) => sum + Number(row.closingValue || 0),
+          0,
+        ),
+      );
 
-    if (openingStock > 0) {
-      entries.push({
-        voucherId: null,
-        voucherName: "Opening Stock",
-        voucherNumber: "",
-        date: fromDate || null,
-        dateLabel: formatDateLabel(fromDate),
-        lineIndex: 0,
-        debit: 0,
-        credit: openingStock,
-        narration: "Opening stock valuation for the selected period.",
-        counterpart: "Inventory Valuation",
-        itemName: "",
-        isSynthetic: true,
-      });
-    }
-
-    periodVouchers.forEach((voucher) => {
-      const voucherNameKey = nameKey(voucher.voucherName || "");
-      const voucherAmount = voucherTotalAmount(voucher);
-      const itemName = (voucher.inventoryLines || [])
-        .map((inventoryLine) => normalizeName(inventoryLine.itemName))
-        .filter(Boolean)
-        .join(", ");
-
-      function pushVoucherEntry({
-        debit = 0,
-        credit = 0,
-        counterpart = "",
-        narration = "",
-        itemNameOverride = itemName,
-      }) {
+      if (openingStock > 0) {
         entries.push({
-          voucherId: voucher._id,
-          voucherName: voucher.voucherName || "Voucher",
-          voucherNumber:
-            voucher.number || voucher.invoiceNumber || voucher.voucherNumber || "",
-          date: voucher.date || null,
-          dateLabel: formatDateLabel(voucher.date),
+          voucherId: null,
+          voucherName: "Opening Stock",
+          voucherNumber: "",
+          date: fromDate || null,
+          dateLabel: formatDateLabel(fromDate),
           lineIndex: 0,
-          debit: normalizeMoney(debit),
-          credit: normalizeMoney(credit),
-          narration: narration || voucher.narration || voucher.note || "",
-          counterpart,
-          itemName: itemNameOverride,
-          isSynthetic: false,
+          debit: 0,
+          credit: openingStock,
+          narration: "Opening stock valuation for the selected period.",
+          counterpart: "Inventory Valuation",
+          itemName: "",
+          isSynthetic: true,
         });
       }
 
-      if (voucherNameKey === "sales" || voucherNameKey === "pos voucher") {
-        pushVoucherEntry({
-          debit: voucherAmount,
-          counterpart:
-            (voucher.lines || [])
-              .map((line) => ledgerMap.get(String(line.ledgerId))?.name || "")
-              .find((name) => name && nameKey(name) !== "sales") || "Sales",
-        });
-      } else if (voucherNameKey === "credit note") {
-        pushVoucherEntry({
-          credit: voucherAmount,
-          counterpart: "Sales Return",
-        });
-      } else if (voucherNameKey === "purchase") {
-        pushVoucherEntry({
-          credit: voucherAmount,
-          counterpart:
-            (voucher.lines || [])
-              .map((line) => ledgerMap.get(String(line.ledgerId))?.name || "")
-              .find((name) => name && nameKey(name) !== "purchase") || "Purchase",
-        });
-      } else if (voucherNameKey === "debit note") {
-        pushVoucherEntry({
-          debit: voucherAmount,
-          counterpart: "Purchase Return",
-        });
-      }
+      periodVouchers.forEach((voucher) => {
+        const voucherNameKey = nameKey(voucher.voucherName || "");
+        const voucherAmount = voucherTotalAmount(voucher);
+        const itemName = (voucher.inventoryLines || [])
+          .map((inventoryLine) => normalizeName(inventoryLine.itemName))
+          .filter(Boolean)
+          .join(", ");
 
-      (voucher.lines || []).forEach((line, lineIndex) => {
-        const ledger = ledgerMap.get(String(line.ledgerId));
-        const group = groupMap.get(String(ledger?.groupId)) || ledger?.group;
-        if (!ledger || !group || group.affectsGrossProfit) return;
-
-        const debit = Number(line.debit || 0);
-        const credit = Number(line.credit || 0);
-
-        if (group.nature === "INCOME") {
-          const effect = normalizeMoney(credit - debit);
-          if (!effect) return;
+        function pushVoucherEntry({
+          debit = 0,
+          credit = 0,
+          counterpart = "",
+          narration = "",
+          itemNameOverride = itemName,
+        }) {
           entries.push({
             voucherId: voucher._id,
             voucherName: voucher.voucherName || "Voucher",
             voucherNumber:
-              voucher.number || voucher.invoiceNumber || voucher.voucherNumber || "",
+              voucher.number ||
+              voucher.invoiceNumber ||
+              voucher.voucherNumber ||
+              "",
             date: voucher.date || null,
             dateLabel: formatDateLabel(voucher.date),
-            lineIndex,
-            debit: effect > 0 ? effect : 0,
-            credit: effect < 0 ? Math.abs(effect) : 0,
-            narration: line.narration || voucher.narration || voucher.note || "",
-            counterpart: ledger.name,
-            itemName: "",
+            lineIndex: 0,
+            debit: normalizeMoney(debit),
+            credit: normalizeMoney(credit),
+            narration: narration || voucher.narration || voucher.note || "",
+            counterpart,
+            itemName: itemNameOverride,
             isSynthetic: false,
           });
         }
 
-        if (group.nature === "EXPENSE") {
-          const effect = normalizeMoney(debit - credit);
-          if (!effect) return;
-          entries.push({
-            voucherId: voucher._id,
-            voucherName: voucher.voucherName || "Voucher",
-            voucherNumber:
-              voucher.number || voucher.invoiceNumber || voucher.voucherNumber || "",
-            date: voucher.date || null,
-            dateLabel: formatDateLabel(voucher.date),
-            lineIndex,
-            debit: effect < 0 ? Math.abs(effect) : 0,
-            credit: effect > 0 ? effect : 0,
-            narration: line.narration || voucher.narration || voucher.note || "",
-            counterpart: ledger.name,
-            itemName: "",
-            isSynthetic: false,
+        if (voucherNameKey === "sales" || voucherNameKey === "pos voucher") {
+          pushVoucherEntry({
+            debit: voucherAmount,
+            counterpart:
+              (voucher.lines || [])
+                .map((line) => ledgerMap.get(String(line.ledgerId))?.name || "")
+                .find((name) => name && nameKey(name) !== "sales") || "Sales",
+          });
+        } else if (voucherNameKey === "credit note") {
+          pushVoucherEntry({
+            credit: voucherAmount,
+            counterpart: "Sales Return",
+          });
+        } else if (voucherNameKey === "purchase") {
+          pushVoucherEntry({
+            credit: voucherAmount,
+            counterpart:
+              (voucher.lines || [])
+                .map((line) => ledgerMap.get(String(line.ledgerId))?.name || "")
+                .find((name) => name && nameKey(name) !== "purchase") ||
+              "Purchase",
+          });
+        } else if (voucherNameKey === "debit note") {
+          pushVoucherEntry({
+            debit: voucherAmount,
+            counterpart: "Purchase Return",
           });
         }
-      });
-    });
 
-    if (closingStock > 0) {
-      entries.push({
-        voucherId: null,
-        voucherName: "Closing Stock",
-        voucherNumber: "",
-        date: toDate || null,
-        dateLabel: formatDateLabel(toDate),
-        lineIndex: 0,
-        debit: closingStock,
-        credit: 0,
-        narration: "Closing stock valuation for the selected period.",
-        counterpart: "Inventory Valuation",
-        itemName: "",
-        isSynthetic: true,
+        (voucher.lines || []).forEach((line, lineIndex) => {
+          const ledger = ledgerMap.get(String(line.ledgerId));
+          const group = groupMap.get(String(ledger?.groupId)) || ledger?.group;
+          if (!ledger || !group || group.affectsGrossProfit) return;
+
+          const debit = Number(line.debit || 0);
+          const credit = Number(line.credit || 0);
+
+          if (group.nature === "INCOME") {
+            const effect = normalizeMoney(credit - debit);
+            if (!effect) return;
+            entries.push({
+              voucherId: voucher._id,
+              voucherName: voucher.voucherName || "Voucher",
+              voucherNumber:
+                voucher.number ||
+                voucher.invoiceNumber ||
+                voucher.voucherNumber ||
+                "",
+              date: voucher.date || null,
+              dateLabel: formatDateLabel(voucher.date),
+              lineIndex,
+              debit: effect > 0 ? effect : 0,
+              credit: effect < 0 ? Math.abs(effect) : 0,
+              narration:
+                line.narration || voucher.narration || voucher.note || "",
+              counterpart: ledger.name,
+              itemName: "",
+              isSynthetic: false,
+            });
+          }
+
+          if (group.nature === "EXPENSE") {
+            const effect = normalizeMoney(debit - credit);
+            if (!effect) return;
+            entries.push({
+              voucherId: voucher._id,
+              voucherName: voucher.voucherName || "Voucher",
+              voucherNumber:
+                voucher.number ||
+                voucher.invoiceNumber ||
+                voucher.voucherNumber ||
+                "",
+              date: voucher.date || null,
+              dateLabel: formatDateLabel(voucher.date),
+              lineIndex,
+              debit: effect < 0 ? Math.abs(effect) : 0,
+              credit: effect > 0 ? effect : 0,
+              narration:
+                line.narration || voucher.narration || voucher.note || "",
+              counterpart: ledger.name,
+              itemName: "",
+              isSynthetic: false,
+            });
+          }
+        });
       });
+
+      if (closingStock > 0) {
+        entries.push({
+          voucherId: null,
+          voucherName: "Closing Stock",
+          voucherNumber: "",
+          date: toDate || null,
+          dateLabel: formatDateLabel(toDate),
+          lineIndex: 0,
+          debit: closingStock,
+          credit: 0,
+          narration: "Closing stock valuation for the selected period.",
+          counterpart: "Inventory Valuation",
+          itemName: "",
+          isSynthetic: true,
+        });
+      }
+
+      const totalDebitCents = entries.reduce(
+        (sum, entry) => sum + moneyToCents(entry.debit || 0),
+        0,
+      );
+      const totalCreditCents = entries.reduce(
+        (sum, entry) => sum + moneyToCents(entry.credit || 0),
+        0,
+      );
+      const totalDebit = centsToMoney(totalDebitCents);
+      const totalCredit = centsToMoney(totalCreditCents);
+
+      let runningBalanceCents = 0;
+      const entriesWithRunning = entries.map((entry) => {
+        runningBalanceCents +=
+          moneyToCents(entry.debit || 0) - moneyToCents(entry.credit || 0);
+        return {
+          ...entry,
+          runningBalance: centsToMoney(runningBalanceCents),
+        };
+      });
+
+      res.json({
+        ledger: {
+          ledgerId: "__profit_loss__",
+          ledgerName: "Profit & Loss A/c",
+          groupName: "Profit & Loss",
+        },
+        openingBalance: 0,
+        fixedOpeningBalance: 0,
+        movementBeforeFrom: 0,
+        totals: {
+          debit: totalDebit,
+          credit: totalCredit,
+        },
+        closingBalance: centsToMoney(totalDebitCents - totalCreditCents),
+        entries: entriesWithRunning,
+      });
+    } catch (err) {
+      console.error("Error loading profit & loss drilldown:", err);
+      res
+        .status(500)
+        .json({ message: "Error loading profit & loss drilldown" });
     }
-
-    const totalDebitCents = entries.reduce(
-      (sum, entry) => sum + moneyToCents(entry.debit || 0),
-      0,
-    );
-    const totalCreditCents = entries.reduce(
-      (sum, entry) => sum + moneyToCents(entry.credit || 0),
-      0,
-    );
-    const totalDebit = centsToMoney(totalDebitCents);
-    const totalCredit = centsToMoney(totalCreditCents);
-
-    let runningBalanceCents = 0;
-    const entriesWithRunning = entries.map((entry) => {
-      runningBalanceCents +=
-        moneyToCents(entry.debit || 0) - moneyToCents(entry.credit || 0);
-      return {
-        ...entry,
-        runningBalance: centsToMoney(runningBalanceCents),
-      };
-    });
-
-    res.json({
-      ledger: {
-        ledgerId: "__profit_loss__",
-        ledgerName: "Profit & Loss A/c",
-        groupName: "Profit & Loss",
-      },
-      openingBalance: 0,
-      fixedOpeningBalance: 0,
-      movementBeforeFrom: 0,
-      totals: {
-        debit: totalDebit,
-        credit: totalCredit,
-      },
-      closingBalance: centsToMoney(totalDebitCents - totalCreditCents),
-      entries: entriesWithRunning,
-    });
-  } catch (err) {
-    console.error("Error loading profit & loss drilldown:", err);
-    res.status(500).json({ message: "Error loading profit & loss drilldown" });
-  }
-});
+  },
+);
 
 app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
   try {
@@ -7427,8 +7618,7 @@ app.get("/companies/:companyId/reports/trial-balance", async (req, res) => {
     const rows = ledgers.map((l) => {
       const openingMovementCents = openingMap.get(String(l._id)) || 0;
       const fixedOpeningCents =
-        (l.openingDrCr === "DR" ? 1 : -1) *
-        moneyToCents(l.openingBalance || 0);
+        (l.openingDrCr === "DR" ? 1 : -1) * moneyToCents(l.openingBalance || 0);
 
       // TRUE OPENING = fixed opening + all movements before selected FROM
       const openingCents = fixedOpeningCents + openingMovementCents;
@@ -7922,217 +8112,95 @@ app.get("/companies/:companyId/items", async (req, res) => {
 
 // Create item (like Stock Item in Tally)
 // CREATE ITEM (Tally Style)
-app.post("/companies/:companyId/items", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const {
-      name,
-      alias,
-      secondaryAliases,
-      groupId,
-      stockCategoryId,
-      stockCategory,
-      unitId,
-      unitOfMeasure,
-      godownId,
-      inventoryRole,
-      description,
-      notes,
-      picture,
-      narration,
-      openingQty,
-      openingRate,
-      openingValue,
-      prices,
-    } = req.body;
-    const normalizedName = normalizeName(name);
-    if (!normalizedName || !groupId) {
-      return res
-        .status(400)
-        .json({ message: "Item name and group are required" });
-    }
+app.post(
+  "/companies/:companyId/items",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const {
+        name,
+        alias,
+        secondaryAliases,
+        groupId,
+        stockCategoryId,
+        stockCategory,
+        unitId,
+        unitOfMeasure,
+        godownId,
+        inventoryRole,
+        description,
+        notes,
+        picture,
+        narration,
+        openingQty,
+        openingRate,
+        openingValue,
+        prices,
+      } = req.body;
+      const normalizedName = normalizeName(name);
+      if (!normalizedName || !groupId) {
+        return res
+          .status(400)
+          .json({ message: "Item name and group are required" });
+      }
 
-    const group = await Groups.findOne({
-      _id: new ObjectId(groupId),
-      companyId,
-    });
-    if (!group) {
-      return res.status(400).json({ message: "Stock group not found" });
-    }
-    if (!(await isStockGroup(companyId, group._id))) {
-      return res
-        .status(400)
-        .json({ message: "Items must be created under a stock group" });
-    }
-
-    const duplicate = await Items.findOne({
-      companyId,
-      name: {
-        $regex: `^${normalizedName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-        $options: "i",
-      },
-    });
-    if (duplicate) {
-      return res.status(400).json({ message: "Item name already exists" });
-    }
-
-    const normalizedIdentifiers = normalizeItemIdentifierList([
-      alias,
-      ...(Array.isArray(secondaryAliases) ? secondaryAliases : []),
-    ]);
-    const conflictingIdentifierItem = await findConflictingItemIdentifier(
-      companyId,
-      normalizedIdentifiers,
-    );
-    if (conflictingIdentifierItem) {
-      return res.status(400).json({
-        message: `Alias or secondary alias already used by ${conflictingIdentifierItem.name}`,
+      const group = await Groups.findOne({
+        _id: new ObjectId(groupId),
+        companyId,
       });
-    }
+      if (!group) {
+        return res.status(400).json({ message: "Stock group not found" });
+      }
+      if (!(await isStockGroup(companyId, group._id))) {
+        return res
+          .status(400)
+          .json({ message: "Items must be created under a stock group" });
+      }
 
-    const resolvedStockCategory = await resolveMasterName(
-      StockCategories,
-      companyId,
-      stockCategoryId || stockCategory,
-    );
-    const resolvedUnit = await resolveMasterName(
-      Units,
-      companyId,
-      unitId || unitOfMeasure,
-    );
-    const resolvedGodown = await resolveMasterName(
-      Godowns,
-      companyId,
-      godownId,
-    );
-
-    const doc = {
-      companyId,
-      name: normalizedName,
-      alias: normalizeName(alias),
-      secondaryAliases: normalizeItemIdentifierList(secondaryAliases || []),
-      groupId: new ObjectId(groupId),
-      stockCategoryId:
-        stockCategoryId && ObjectId.isValid(stockCategoryId)
-          ? new ObjectId(stockCategoryId)
-          : null,
-      stockCategory: normalizeName(resolvedStockCategory),
-      unitId: unitId && ObjectId.isValid(unitId) ? new ObjectId(unitId) : null,
-      unitOfMeasure: normalizeName(resolvedUnit),
-      godownId:
-        godownId && ObjectId.isValid(godownId) ? new ObjectId(godownId) : null,
-      godownName: normalizeName(resolvedGodown),
-      inventoryRole: inventoryRoleKey(inventoryRole),
-      description: normalizeName(description),
-      notes: normalizeName(notes),
-      picture: picture || "",
-      narration: normalizeName(narration),
-      openingQty: Number(openingQty) || 0,
-      openingRate: Number(openingRate) || 0,
-      openingValue: Number(openingValue) || 0,
-      prices: prices || [], // ← PRICE LEVELS ARRAY
-      createdAt: new Date(),
-    };
-
-    const result = await db.collection("items").insertOne(doc);
-
-    res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (err) {
-    console.error("Error creating item:", err);
-    res.status(500).json({ message: "Error creating item" });
-  }
-});
-
-// Update item
-app.put("/companies/:companyId/items/:itemId", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const itemId = new ObjectId(req.params.itemId);
-
-    const {
-      name,
-      alias,
-      secondaryAliases,
-      groupId,
-      stockCategoryId,
-      stockCategory,
-      unitId,
-      unitOfMeasure,
-      godownId,
-      inventoryRole,
-      description,
-      notes,
-      picture,
-      narration,
-      openingQty,
-      openingRate,
-      prices, // NEW
-    } = req.body;
-    const normalizedName = normalizeName(name);
-    if (!normalizedName || !groupId) {
-      return res
-        .status(400)
-        .json({ message: "Item name and group are required" });
-    }
-
-    const duplicate = await Items.findOne({
-      _id: { $ne: itemId },
-      companyId,
-      name: {
-        $regex: `^${normalizedName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-        $options: "i",
-      },
-    });
-    if (duplicate) {
-      return res.status(400).json({ message: "Item name already exists" });
-    }
-    const normalizedIdentifiers = normalizeItemIdentifierList([
-      alias,
-      ...(Array.isArray(secondaryAliases) ? secondaryAliases : []),
-    ]);
-    const conflictingIdentifierItem = await findConflictingItemIdentifier(
-      companyId,
-      normalizedIdentifiers,
-      itemId,
-    );
-    if (conflictingIdentifierItem) {
-      return res.status(400).json({
-        message: `Alias or secondary alias already used by ${conflictingIdentifierItem.name}`,
+      const duplicate = await Items.findOne({
+        companyId,
+        name: {
+          $regex: `^${normalizedName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          $options: "i",
+        },
       });
-    }
-    const group = await Groups.findOne({
-      _id: new ObjectId(groupId),
-      companyId,
-    });
-    if (!group) {
-      return res.status(400).json({ message: "Stock group not found" });
-    }
-    if (!(await isStockGroup(companyId, group._id))) {
-      return res
-        .status(400)
-        .json({ message: "Items must be created under a stock group" });
-    }
+      if (duplicate) {
+        return res.status(400).json({ message: "Item name already exists" });
+      }
 
-    const resolvedStockCategory = await resolveMasterName(
-      StockCategories,
-      companyId,
-      stockCategoryId || stockCategory,
-    );
-    const resolvedUnit = await resolveMasterName(
-      Units,
-      companyId,
-      unitId || unitOfMeasure,
-    );
-    const resolvedGodown = await resolveMasterName(
-      Godowns,
-      companyId,
-      godownId,
-    );
+      const normalizedIdentifiers = normalizeItemIdentifierList([
+        alias,
+        ...(Array.isArray(secondaryAliases) ? secondaryAliases : []),
+      ]);
+      const conflictingIdentifierItem = await findConflictingItemIdentifier(
+        companyId,
+        normalizedIdentifiers,
+      );
+      if (conflictingIdentifierItem) {
+        return res.status(400).json({
+          message: `Alias or secondary alias already used by ${conflictingIdentifierItem.name}`,
+        });
+      }
 
-    const openingValue = Number(openingQty) * Number(openingRate);
+      const resolvedStockCategory = await resolveMasterName(
+        StockCategories,
+        companyId,
+        stockCategoryId || stockCategory,
+      );
+      const resolvedUnit = await resolveMasterName(
+        Units,
+        companyId,
+        unitId || unitOfMeasure,
+      );
+      const resolvedGodown = await resolveMasterName(
+        Godowns,
+        companyId,
+        godownId,
+      );
 
-    const update = {
-      $set: {
+      const doc = {
+        companyId,
         name: normalizedName,
         alias: normalizeName(alias),
         secondaryAliases: normalizeItemIdentifierList(secondaryAliases || []),
@@ -8155,90 +8223,313 @@ app.put("/companies/:companyId/items/:itemId", requireCompanyWriteAccess(ROLE_GR
         notes: normalizeName(notes),
         picture: picture || "",
         narration: normalizeName(narration),
-        openingQty: Number(openingQty),
-        openingRate: Number(openingRate),
-        openingValue,
-        prices: prices || [], // NEW
-      },
-    };
+        openingQty: Number(openingQty) || 0,
+        openingRate: Number(openingRate) || 0,
+        openingValue: Number(openingValue) || 0,
+        prices: prices || [], // ← PRICE LEVELS ARRAY
+        createdAt: new Date(),
+      };
 
-    await Items.updateOne({ _id: itemId, companyId }, update);
+      const result = await db.collection("items").insertOne(doc);
 
-    const updated = await Items.findOne({ _id: itemId, companyId });
-    res.json(updated);
-  } catch (err) {
-    console.error("Error updating item:", err);
-    res.status(500).json({ message: "Error updating item" });
-  }
-});
-
-// Bulk update item prices by group (includes child groups)
-app.put("/companies/:companyId/update-prices-by-group", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
-  try {
-    const { companyId } = req.params;
-    const { groupId, priceLevelId, rate, effectiveFrom } = req.body;
-
-    // ----------- VALIDATION -----------
-    if (!companyId || !groupId || !priceLevelId || rate === undefined) {
-      return res.status(400).json({
-        message: "companyId, groupId, priceLevelId and rate are required",
-      });
-    }
-
-    if (isNaN(rate)) {
-      return res.status(400).json({ message: "Rate must be a number" });
-    }
-
-    const effectiveDate = safeDate(effectiveFrom) || new Date();
-    const effectiveDateKey = effectiveDate.toISOString().slice(0, 10);
-
-    let companyObjectId, groupObjectId;
-
-    try {
-      companyObjectId = new ObjectId(companyId);
-      groupObjectId = new ObjectId(groupId);
+      res.status(201).json({ _id: result.insertedId, ...doc });
     } catch (err) {
-      return res.status(400).json({ message: "Invalid ID format" });
+      console.error("Error creating item:", err);
+      res.status(500).json({ message: "Error creating item" });
     }
+  },
+);
 
-    // ----------- CHECK GROUP IS VALID FOR THIS COMPANY -----------
-    const groupExists = await Groups.findOne({
-      _id: groupObjectId,
-      companyId: companyObjectId,
-    });
+// Update item
+app.put(
+  "/companies/:companyId/items/:itemId",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const itemId = new ObjectId(req.params.itemId);
 
-    if (!groupExists) {
-      return res.status(404).json({ message: "Group not found in company" });
-    }
-
-    // ----------- RECURSIVE CHILD GROUP COLLECTOR -----------
-    const getAllChildGroupIds = async (parentId) => {
-      const children = await Groups.find({
-        companyId: companyObjectId,
-        parentId,
-      }).toArray();
-
-      let ids = [parentId]; // include self
-
-      for (const child of children) {
-        const childIds = await getAllChildGroupIds(child._id);
-        ids = ids.concat(childIds);
+      const {
+        name,
+        alias,
+        secondaryAliases,
+        groupId,
+        stockCategoryId,
+        stockCategory,
+        unitId,
+        unitOfMeasure,
+        godownId,
+        inventoryRole,
+        description,
+        notes,
+        picture,
+        narration,
+        openingQty,
+        openingRate,
+        prices, // NEW
+      } = req.body;
+      const normalizedName = normalizeName(name);
+      if (!normalizedName || !groupId) {
+        return res
+          .status(400)
+          .json({ message: "Item name and group are required" });
       }
 
-      return ids;
-    };
+      const duplicate = await Items.findOne({
+        _id: { $ne: itemId },
+        companyId,
+        name: {
+          $regex: `^${normalizedName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          $options: "i",
+        },
+      });
+      if (duplicate) {
+        return res.status(400).json({ message: "Item name already exists" });
+      }
+      const normalizedIdentifiers = normalizeItemIdentifierList([
+        alias,
+        ...(Array.isArray(secondaryAliases) ? secondaryAliases : []),
+      ]);
+      const conflictingIdentifierItem = await findConflictingItemIdentifier(
+        companyId,
+        normalizedIdentifiers,
+        itemId,
+      );
+      if (conflictingIdentifierItem) {
+        return res.status(400).json({
+          message: `Alias or secondary alias already used by ${conflictingIdentifierItem.name}`,
+        });
+      }
+      const group = await Groups.findOne({
+        _id: new ObjectId(groupId),
+        companyId,
+      });
+      if (!group) {
+        return res.status(400).json({ message: "Stock group not found" });
+      }
+      if (!(await isStockGroup(companyId, group._id))) {
+        return res
+          .status(400)
+          .json({ message: "Items must be created under a stock group" });
+      }
 
-    const allGroupIds = await getAllChildGroupIds(groupObjectId);
-    const targetItems = await Items.find({
-      companyId: companyObjectId,
-      groupId: { $in: allGroupIds },
-    }).toArray();
+      const resolvedStockCategory = await resolveMasterName(
+        StockCategories,
+        companyId,
+        stockCategoryId || stockCategory,
+      );
+      const resolvedUnit = await resolveMasterName(
+        Units,
+        companyId,
+        unitId || unitOfMeasure,
+      );
+      const resolvedGodown = await resolveMasterName(
+        Godowns,
+        companyId,
+        godownId,
+      );
 
-    let addedPriceLevels = 0;
-    let updatedPriceLevels = 0;
+      const openingValue = Number(openingQty) * Number(openingRate);
 
-    for (const item of targetItems) {
+      const update = {
+        $set: {
+          name: normalizedName,
+          alias: normalizeName(alias),
+          secondaryAliases: normalizeItemIdentifierList(secondaryAliases || []),
+          groupId: new ObjectId(groupId),
+          stockCategoryId:
+            stockCategoryId && ObjectId.isValid(stockCategoryId)
+              ? new ObjectId(stockCategoryId)
+              : null,
+          stockCategory: normalizeName(resolvedStockCategory),
+          unitId:
+            unitId && ObjectId.isValid(unitId) ? new ObjectId(unitId) : null,
+          unitOfMeasure: normalizeName(resolvedUnit),
+          godownId:
+            godownId && ObjectId.isValid(godownId)
+              ? new ObjectId(godownId)
+              : null,
+          godownName: normalizeName(resolvedGodown),
+          inventoryRole: inventoryRoleKey(inventoryRole),
+          description: normalizeName(description),
+          notes: normalizeName(notes),
+          picture: picture || "",
+          narration: normalizeName(narration),
+          openingQty: Number(openingQty),
+          openingRate: Number(openingRate),
+          openingValue,
+          prices: prices || [], // NEW
+        },
+      };
+
+      await Items.updateOne({ _id: itemId, companyId }, update);
+
+      const updated = await Items.findOne({ _id: itemId, companyId });
+      res.json(updated);
+    } catch (err) {
+      console.error("Error updating item:", err);
+      res.status(500).json({ message: "Error updating item" });
+    }
+  },
+);
+
+// Bulk update item prices by group (includes child groups)
+app.put(
+  "/companies/:companyId/update-prices-by-group",
+  requireCompanyWriteAccess(ROLE_GROUPS.priceManagement),
+  async (req, res) => {
+    try {
+      const { companyId } = req.params;
+      const { groupId, priceLevelId, rate, effectiveFrom } = req.body;
+
+      // ----------- VALIDATION -----------
+      if (!companyId || !groupId || !priceLevelId || rate === undefined) {
+        return res.status(400).json({
+          message: "companyId, groupId, priceLevelId and rate are required",
+        });
+      }
+
+      if (isNaN(rate)) {
+        return res.status(400).json({ message: "Rate must be a number" });
+      }
+
+      const effectiveDate = safeDate(effectiveFrom) || new Date();
+      const effectiveDateKey = effectiveDate.toISOString().slice(0, 10);
+
+      let companyObjectId, groupObjectId;
+
+      try {
+        companyObjectId = new ObjectId(companyId);
+        groupObjectId = new ObjectId(groupId);
+      } catch (err) {
+        return res.status(400).json({ message: "Invalid ID format" });
+      }
+
+      // ----------- CHECK GROUP IS VALID FOR THIS COMPANY -----------
+      const groupExists = await Groups.findOne({
+        _id: groupObjectId,
+        companyId: companyObjectId,
+      });
+
+      if (!groupExists) {
+        return res.status(404).json({ message: "Group not found in company" });
+      }
+
+      // ----------- RECURSIVE CHILD GROUP COLLECTOR -----------
+      const getAllChildGroupIds = async (parentId) => {
+        const children = await Groups.find({
+          companyId: companyObjectId,
+          parentId,
+        }).toArray();
+
+        let ids = [parentId]; // include self
+
+        for (const child of children) {
+          const childIds = await getAllChildGroupIds(child._id);
+          ids = ids.concat(childIds);
+        }
+
+        return ids;
+      };
+
+      const allGroupIds = await getAllChildGroupIds(groupObjectId);
+      const targetItems = await Items.find({
+        companyId: companyObjectId,
+        groupId: { $in: allGroupIds },
+      }).toArray();
+
+      let addedPriceLevels = 0;
+      let updatedPriceLevels = 0;
+
+      for (const item of targetItems) {
+        const prices = Array.isArray(item.prices) ? [...item.prices] : [];
+        const existingIndex = prices.findIndex((entry) => {
+          const entryDateKey = entry?.effectiveFrom
+            ? new Date(entry.effectiveFrom).toISOString().slice(0, 10)
+            : "";
+          return (
+            entry?.priceLevelId === priceLevelId &&
+            entryDateKey === effectiveDateKey
+          );
+        });
+
+        if (existingIndex >= 0) {
+          prices[existingIndex] = {
+            ...prices[existingIndex],
+            rate: Number(rate),
+            effectiveFrom: effectiveDate,
+          };
+          updatedPriceLevels += 1;
+        } else {
+          prices.push({
+            priceLevelId,
+            rate: Number(rate),
+            effectiveFrom: effectiveDate,
+          });
+          addedPriceLevels += 1;
+        }
+
+        await Items.updateOne(
+          { _id: item._id, companyId: companyObjectId },
+          { $set: { prices } },
+        );
+      }
+
+      res.json({
+        message: "Bulk price update completed",
+        effectiveFrom: effectiveDateKey,
+        addedPriceLevels,
+        updatedPriceLevels,
+      });
+    } catch (err) {
+      console.error("❌ Bulk update error:", err);
+      res.status(500).json({
+        message: "Bulk update failed",
+        error: err.message,
+      });
+    }
+  },
+);
+
+app.put(
+  "/companies/:companyId/update-price-by-item",
+  requireCompanyWriteAccess(ROLE_GROUPS.priceManagement),
+  async (req, res) => {
+    try {
+      const { companyId } = req.params;
+      const { itemId, priceLevelId, rate, effectiveFrom } = req.body;
+
+      if (!companyId || !itemId || !priceLevelId || rate === undefined) {
+        return res.status(400).json({
+          message: "companyId, itemId, priceLevelId and rate are required",
+        });
+      }
+
+      if (isNaN(rate)) {
+        return res.status(400).json({ message: "Rate must be a number" });
+      }
+
+      let companyObjectId, itemObjectId;
+      try {
+        companyObjectId = new ObjectId(companyId);
+        itemObjectId = new ObjectId(itemId);
+      } catch (err) {
+        return res.status(400).json({ message: "Invalid ID format" });
+      }
+
+      const item = await Items.findOne({
+        _id: itemObjectId,
+        companyId: companyObjectId,
+      });
+
+      if (!item) {
+        return res.status(404).json({ message: "Item not found in company" });
+      }
+
+      const effectiveDate = safeDate(effectiveFrom) || new Date();
+      const effectiveDateKey = effectiveDate.toISOString().slice(0, 10);
       const prices = Array.isArray(item.prices) ? [...item.prices] : [];
+
       const existingIndex = prices.findIndex((entry) => {
         const entryDateKey = entry?.effectiveFrom
           ? new Date(entry.effectiveFrom).toISOString().slice(0, 10)
@@ -8255,158 +8546,77 @@ app.put("/companies/:companyId/update-prices-by-group", requireCompanyWriteAcces
           rate: Number(rate),
           effectiveFrom: effectiveDate,
         };
-        updatedPriceLevels += 1;
       } else {
         prices.push({
           priceLevelId,
           rate: Number(rate),
           effectiveFrom: effectiveDate,
         });
-        addedPriceLevels += 1;
       }
 
       await Items.updateOne(
-        { _id: item._id, companyId: companyObjectId },
+        { _id: itemObjectId, companyId: companyObjectId },
         { $set: { prices } },
       );
-    }
 
-    res.json({
-      message: "Bulk price update completed",
-      effectiveFrom: effectiveDateKey,
-      addedPriceLevels,
-      updatedPriceLevels,
-    });
-  } catch (err) {
-    console.error("❌ Bulk update error:", err);
-    res.status(500).json({
-      message: "Bulk update failed",
-      error: err.message,
-    });
-  }
-});
-
-app.put("/companies/:companyId/update-price-by-item", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
-  try {
-    const { companyId } = req.params;
-    const { itemId, priceLevelId, rate, effectiveFrom } = req.body;
-
-    if (!companyId || !itemId || !priceLevelId || rate === undefined) {
-      return res.status(400).json({
-        message: "companyId, itemId, priceLevelId and rate are required",
+      res.json({
+        message: "Item price update completed",
+        effectiveFrom: effectiveDateKey,
+        itemId,
       });
-    }
-
-    if (isNaN(rate)) {
-      return res.status(400).json({ message: "Rate must be a number" });
-    }
-
-    let companyObjectId, itemObjectId;
-    try {
-      companyObjectId = new ObjectId(companyId);
-      itemObjectId = new ObjectId(itemId);
     } catch (err) {
-      return res.status(400).json({ message: "Invalid ID format" });
-    }
-
-    const item = await Items.findOne({
-      _id: itemObjectId,
-      companyId: companyObjectId,
-    });
-
-    if (!item) {
-      return res.status(404).json({ message: "Item not found in company" });
-    }
-
-    const effectiveDate = safeDate(effectiveFrom) || new Date();
-    const effectiveDateKey = effectiveDate.toISOString().slice(0, 10);
-    const prices = Array.isArray(item.prices) ? [...item.prices] : [];
-
-    const existingIndex = prices.findIndex((entry) => {
-      const entryDateKey = entry?.effectiveFrom
-        ? new Date(entry.effectiveFrom).toISOString().slice(0, 10)
-        : "";
-      return (
-        entry?.priceLevelId === priceLevelId &&
-        entryDateKey === effectiveDateKey
-      );
-    });
-
-    if (existingIndex >= 0) {
-      prices[existingIndex] = {
-        ...prices[existingIndex],
-        rate: Number(rate),
-        effectiveFrom: effectiveDate,
-      };
-    } else {
-      prices.push({
-        priceLevelId,
-        rate: Number(rate),
-        effectiveFrom: effectiveDate,
+      console.error("Error updating item price:", err);
+      res.status(500).json({
+        message: "Item price update failed",
+        error: err.message,
       });
     }
-
-    await Items.updateOne(
-      { _id: itemObjectId, companyId: companyObjectId },
-      { $set: { prices } },
-    );
-
-    res.json({
-      message: "Item price update completed",
-      effectiveFrom: effectiveDateKey,
-      itemId,
-    });
-  } catch (err) {
-    console.error("Error updating item price:", err);
-    res.status(500).json({
-      message: "Item price update failed",
-      error: err.message,
-    });
-  }
-});
+  },
+);
 
 // Delete item (guard: not used in vouchers)
-app.delete("/companies/:companyId/items/:itemId", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const itemId = new ObjectId(req.params.itemId);
-    const existingItem = await Items.findOne({ _id: itemId, companyId });
-    if (!existingItem) {
-      return res.status(404).json({ message: "Item not found" });
+app.delete(
+  "/companies/:companyId/items/:itemId",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const itemId = new ObjectId(req.params.itemId);
+      const existingItem = await Items.findOne({ _id: itemId, companyId });
+      if (!existingItem) {
+        return res.status(404).json({ message: "Item not found" });
+      }
+
+      const used = await Vouchers.countDocuments({
+        ...activeVoucherFilter({ companyId }),
+        "inventoryLines.itemId": itemId,
+      });
+
+      if (used > 0) {
+        return res
+          .status(400)
+          .json({ message: "Item is used in vouchers. Cannot delete." });
+      }
+
+      const usedInBom = await Boms.countDocuments({
+        companyId,
+        $or: [{ outputItemId: itemId }, { "components.itemId": itemId }],
+      });
+
+      if (usedInBom > 0) {
+        return res.status(400).json({
+          message: "Item is used in BOM or production setup. Cannot delete.",
+        });
+      }
+
+      await Items.deleteOne({ _id: itemId, companyId });
+      res.json({ message: "Item deleted" });
+    } catch (err) {
+      console.error("Error deleting item:", err);
+      res.status(500).json({ message: "Error deleting item" });
     }
-
-    const used = await Vouchers.countDocuments({
-      ...activeVoucherFilter({ companyId }),
-      "inventoryLines.itemId": itemId,
-    });
-
-    if (used > 0) {
-      return res
-        .status(400)
-        .json({ message: "Item is used in vouchers. Cannot delete." });
-    }
-
-    const usedInBom = await Boms.countDocuments({
-      companyId,
-      $or: [
-        { outputItemId: itemId },
-        { "components.itemId": itemId },
-      ],
-    });
-
-    if (usedInBom > 0) {
-      return res
-        .status(400)
-        .json({ message: "Item is used in BOM or production setup. Cannot delete." });
-    }
-
-    await Items.deleteOne({ _id: itemId, companyId });
-    res.json({ message: "Item deleted" });
-  } catch (err) {
-    console.error("Error deleting item:", err);
-    res.status(500).json({ message: "Error deleting item" });
-  }
-});
+  },
+);
 
 // ---------- CHART OF ACCOUNTS: GROUPS (hierarchical list) ----------
 app.get("/companies/:companyId/chart-of-accounts/groups", async (req, res) => {
@@ -8496,10 +8706,14 @@ app.get("/companies/:companyId/chart-of-accounts/ledgers", async (req, res) => {
     });
 
     for (const list of childGroups.values()) {
-      list.sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+      list.sort((a, b) =>
+        String(a.name || "").localeCompare(String(b.name || "")),
+      );
     }
     for (const list of groupLedgers.values()) {
-      list.sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+      list.sort((a, b) =>
+        String(a.name || "").localeCompare(String(b.name || "")),
+      );
     }
 
     const result = [];
@@ -8730,139 +8944,148 @@ app.get("/companies/:companyId/manufacturing/boms", async (req, res) => {
   }
 });
 
-app.post("/companies/:companyId/manufacturing/boms", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const {
-      name,
-      finishedItemId,
-      finishedItemName,
-      outputQty,
-      unitId,
-      unitName,
-      description,
-      status = "active",
-      notes,
-      components = [],
-      additionalCosts = [],
-    } = req.body || {};
+app.post(
+  "/companies/:companyId/manufacturing/boms",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const {
+        name,
+        finishedItemId,
+        finishedItemName,
+        outputQty,
+        unitId,
+        unitName,
+        description,
+        status = "active",
+        notes,
+        components = [],
+        additionalCosts = [],
+      } = req.body || {};
 
-    if (!finishedItemId || !ObjectId.isValid(finishedItemId)) {
-      return res.status(400).json({ message: "Finished item is required." });
-    }
+      if (!finishedItemId || !ObjectId.isValid(finishedItemId)) {
+        return res.status(400).json({ message: "Finished item is required." });
+      }
 
-    const finishedItem = await Items.findOne({
-      _id: new ObjectId(finishedItemId),
-      companyId,
-    });
-    if (!finishedItem) {
-      return res.status(400).json({ message: "Finished item not found." });
-    }
+      const finishedItem = await Items.findOne({
+        _id: new ObjectId(finishedItemId),
+        companyId,
+      });
+      if (!finishedItem) {
+        return res.status(400).json({ message: "Finished item not found." });
+      }
 
-    const normalizedComponents = components
-      .map(normalizeBomComponentPayload)
-      .filter((row) => row.itemId && Number(row.qty || 0) > 0);
-    if (normalizedComponents.length === 0) {
-      return res
-        .status(400)
-        .json({ message: "At least one component is required." });
-    }
+      const normalizedComponents = components
+        .map(normalizeBomComponentPayload)
+        .filter((row) => row.itemId && Number(row.qty || 0) > 0);
+      if (normalizedComponents.length === 0) {
+        return res
+          .status(400)
+          .json({ message: "At least one component is required." });
+      }
 
-    const doc = {
-      companyId,
-      name: normalizeName(
-        name || finishedItemName || finishedItem.name || "Manufacturing BoM",
-      ),
-      finishedItemId: new ObjectId(finishedItemId),
-      finishedItemName: normalizeName(
-        finishedItemName || finishedItem.name || "",
-      ),
-      outputQty: normalizeMoney(outputQty || 1),
-      unitId: unitId && ObjectId.isValid(unitId) ? new ObjectId(unitId) : null,
-      unitName: normalizeName(unitName || finishedItem.unitOfMeasure || ""),
-      description: normalizeTextBlock(description || ""),
-      status: nameKey(status) === "inactive" ? "inactive" : "active",
-      notes: normalizeTextBlock(notes || ""),
-      components: normalizedComponents,
-      additionalCosts: (additionalCosts || [])
-        .map(normalizeAdditionalCostPayload)
-        .filter((row) => Number(row.amount || 0) > 0),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-
-    const result = await Boms.insertOne(doc);
-    res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (err) {
-    console.error("Error creating BOM:", err);
-    res.status(500).json({ message: "Unable to create BOM" });
-  }
-});
-
-app.put("/companies/:companyId/manufacturing/boms/:bomId", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const bomId = new ObjectId(req.params.bomId);
-    const existing = await Boms.findOne({ _id: bomId, companyId });
-    if (!existing) {
-      return res.status(404).json({ message: "BOM not found." });
-    }
-
-    const {
-      name,
-      finishedItemId,
-      finishedItemName,
-      outputQty,
-      unitId,
-      unitName,
-      description,
-      status = "active",
-      notes,
-      components = [],
-      additionalCosts = [],
-    } = req.body || {};
-
-    const normalizedComponents = components
-      .map(normalizeBomComponentPayload)
-      .filter((row) => row.itemId && Number(row.qty || 0) > 0);
-
-    const update = {
-      $set: {
-        name: normalizeName(name || existing.name || "Manufacturing BoM"),
-        finishedItemId:
-          finishedItemId && ObjectId.isValid(finishedItemId)
-            ? new ObjectId(finishedItemId)
-            : existing.finishedItemId,
-        finishedItemName: normalizeName(
-          finishedItemName || existing.finishedItemName || "",
+      const doc = {
+        companyId,
+        name: normalizeName(
+          name || finishedItemName || finishedItem.name || "Manufacturing BoM",
         ),
-        outputQty: normalizeMoney(outputQty || existing.outputQty || 1),
+        finishedItemId: new ObjectId(finishedItemId),
+        finishedItemName: normalizeName(
+          finishedItemName || finishedItem.name || "",
+        ),
+        outputQty: normalizeMoney(outputQty || 1),
         unitId:
-          unitId && ObjectId.isValid(unitId)
-            ? new ObjectId(unitId)
-            : existing.unitId || null,
-        unitName: normalizeName(unitName || existing.unitName || ""),
+          unitId && ObjectId.isValid(unitId) ? new ObjectId(unitId) : null,
+        unitName: normalizeName(unitName || finishedItem.unitOfMeasure || ""),
         description: normalizeTextBlock(description || ""),
         status: nameKey(status) === "inactive" ? "inactive" : "active",
         notes: normalizeTextBlock(notes || ""),
-        components:
-          normalizedComponents.length > 0
-            ? normalizedComponents
-            : existing.components || [],
+        components: normalizedComponents,
         additionalCosts: (additionalCosts || [])
           .map(normalizeAdditionalCostPayload)
           .filter((row) => Number(row.amount || 0) > 0),
+        createdAt: new Date(),
         updatedAt: new Date(),
-      },
-    };
+      };
 
-    await Boms.updateOne({ _id: bomId, companyId }, update);
-    res.json(await Boms.findOne({ _id: bomId, companyId }));
-  } catch (err) {
-    console.error("Error updating BOM:", err);
-    res.status(500).json({ message: "Unable to update BOM" });
-  }
-});
+      const result = await Boms.insertOne(doc);
+      res.status(201).json({ _id: result.insertedId, ...doc });
+    } catch (err) {
+      console.error("Error creating BOM:", err);
+      res.status(500).json({ message: "Unable to create BOM" });
+    }
+  },
+);
+
+app.put(
+  "/companies/:companyId/manufacturing/boms/:bomId",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const bomId = new ObjectId(req.params.bomId);
+      const existing = await Boms.findOne({ _id: bomId, companyId });
+      if (!existing) {
+        return res.status(404).json({ message: "BOM not found." });
+      }
+
+      const {
+        name,
+        finishedItemId,
+        finishedItemName,
+        outputQty,
+        unitId,
+        unitName,
+        description,
+        status = "active",
+        notes,
+        components = [],
+        additionalCosts = [],
+      } = req.body || {};
+
+      const normalizedComponents = components
+        .map(normalizeBomComponentPayload)
+        .filter((row) => row.itemId && Number(row.qty || 0) > 0);
+
+      const update = {
+        $set: {
+          name: normalizeName(name || existing.name || "Manufacturing BoM"),
+          finishedItemId:
+            finishedItemId && ObjectId.isValid(finishedItemId)
+              ? new ObjectId(finishedItemId)
+              : existing.finishedItemId,
+          finishedItemName: normalizeName(
+            finishedItemName || existing.finishedItemName || "",
+          ),
+          outputQty: normalizeMoney(outputQty || existing.outputQty || 1),
+          unitId:
+            unitId && ObjectId.isValid(unitId)
+              ? new ObjectId(unitId)
+              : existing.unitId || null,
+          unitName: normalizeName(unitName || existing.unitName || ""),
+          description: normalizeTextBlock(description || ""),
+          status: nameKey(status) === "inactive" ? "inactive" : "active",
+          notes: normalizeTextBlock(notes || ""),
+          components:
+            normalizedComponents.length > 0
+              ? normalizedComponents
+              : existing.components || [],
+          additionalCosts: (additionalCosts || [])
+            .map(normalizeAdditionalCostPayload)
+            .filter((row) => Number(row.amount || 0) > 0),
+          updatedAt: new Date(),
+        },
+      };
+
+      await Boms.updateOne({ _id: bomId, companyId }, update);
+      res.json(await Boms.findOne({ _id: bomId, companyId }));
+    } catch (err) {
+      console.error("Error updating BOM:", err);
+      res.status(500).json({ message: "Unable to update BOM" });
+    }
+  },
+);
 
 app.delete(
   "/companies/:companyId/manufacturing/boms/:bomId",
@@ -9144,7 +9367,9 @@ app.get("/companies/:companyId/reports/profit-loss", async (req, res) => {
     });
 
     res.json({
-      incomes: snapshot.incomes.sort((a, b) => a.ledgerName.localeCompare(b.ledgerName)),
+      incomes: snapshot.incomes.sort((a, b) =>
+        a.ledgerName.localeCompare(b.ledgerName),
+      ),
       expenses: snapshot.expenses.sort((a, b) =>
         a.ledgerName.localeCompare(b.ledgerName),
       ),
@@ -9223,7 +9448,12 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
         if (!targetNode) {
           targetNode = currentNode;
         }
-        if (lowestNode && !currentNode.children.some((child) => String(child.id) === String(lowestNode.id))) {
+        if (
+          lowestNode &&
+          !currentNode.children.some(
+            (child) => String(child.id) === String(lowestNode.id),
+          )
+        ) {
           currentNode.children.push(lowestNode);
         }
         lowestNode = currentNode;
@@ -9248,11 +9478,11 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
           current.amount + (ledger.closingDebit || 0),
         );
         current.ledgers.push({
-            ledgerId: ledger._id,
-            ledgerName: ledger.name,
-            openingAmount: normalizeMoney(ledger.openingDebit || 0),
-            amount: normalizeMoney(ledger.closingDebit || 0),
-          });
+          ledgerId: ledger._id,
+          ledgerName: ledger.name,
+          openingAmount: normalizeMoney(ledger.openingDebit || 0),
+          amount: normalizeMoney(ledger.closingDebit || 0),
+        });
       }
 
       if (group.nature === "LIABILITY") {
@@ -9264,11 +9494,11 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
           current.amount + (ledger.closingCredit || 0),
         );
         current.ledgers.push({
-            ledgerId: ledger._id,
-            ledgerName: ledger.name,
-            openingAmount: normalizeMoney(ledger.openingCredit || 0),
-            amount: normalizeMoney(ledger.closingCredit || 0),
-          });
+          ledgerId: ledger._id,
+          ledgerName: ledger.name,
+          openingAmount: normalizeMoney(ledger.openingCredit || 0),
+          amount: normalizeMoney(ledger.closingCredit || 0),
+        });
       }
     });
 
@@ -9278,14 +9508,20 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
         children: [],
         ledgers: node.ledgers
           .slice()
-          .sort((left, right) => left.ledgerName.localeCompare(right.ledgerName)),
+          .sort((left, right) =>
+            left.ledgerName.localeCompare(right.ledgerName),
+          ),
       }));
       const nodeById = new Map(nodes.map((node) => [String(node.id), node]));
       const roots = [];
 
       nodes.forEach((node) => {
-        const parent = node.parentId ? nodeById.get(String(node.parentId)) : null;
-        const parentGroup = node.parentId ? groupMap.get(String(node.parentId)) : null;
+        const parent = node.parentId
+          ? nodeById.get(String(node.parentId))
+          : null;
+        const parentGroup = node.parentId
+          ? groupMap.get(String(node.parentId))
+          : null;
         if (parent && parentGroup?.nature === nature) {
           parent.children.push(node);
         } else {
@@ -9301,7 +9537,9 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
             node.openingAmount = normalizeMoney(
               node.openingAmount + Number(child.openingAmount || 0),
             );
-            node.amount = normalizeMoney(node.amount + Number(child.amount || 0));
+            node.amount = normalizeMoney(
+              node.amount + Number(child.amount || 0),
+            );
           });
       }
 
@@ -9346,7 +9584,9 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
 
     if (netProfit !== 0) {
       const profitLossLedger =
-        ledgers.find((ledger) => nameKey(ledger.name || "") === "profit & loss a/c") || null;
+        ledgers.find(
+          (ledger) => nameKey(ledger.name || "") === "profit & loss a/c",
+        ) || null;
       const profitLossGroup = groups.find(
         (group) => nameKey(group.name || "") === "profit & loss",
       );
@@ -9603,15 +9843,20 @@ app.get("/companies/:companyId/reports/dashboard", async (req, res) => {
   }
 });
 
-app.get("/companies/:companyId/reports/manufacturing-dashboard", async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    res.json(await buildManufacturingDashboard(companyId));
-  } catch (err) {
-    console.error("Error loading manufacturing dashboard report:", err);
-    res.status(500).json({ message: "Error loading manufacturing dashboard report" });
-  }
-});
+app.get(
+  "/companies/:companyId/reports/manufacturing-dashboard",
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      res.json(await buildManufacturingDashboard(companyId));
+    } catch (err) {
+      console.error("Error loading manufacturing dashboard report:", err);
+      res
+        .status(500)
+        .json({ message: "Error loading manufacturing dashboard report" });
+    }
+  },
+);
 
 app.get("/companies/:companyId/reports/outstanding", async (req, res) => {
   try {
@@ -9847,34 +10092,38 @@ app.get(
   },
 );
 
-app.post("/companies/:companyId/price-levels", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const { code, name } = req.body;
+app.post(
+  "/companies/:companyId/price-levels",
+  requireCompanyWriteAccess(ROLE_GROUPS.priceManagement),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const { code, name } = req.body;
 
-    if (!code || !name) {
-      return res.status(400).json({ message: "Code and Name required" });
+      if (!code || !name) {
+        return res.status(400).json({ message: "Code and Name required" });
+      }
+
+      // Prevent duplicates
+      const exists = await pricelevels.findOne({ companyId, code });
+      if (exists)
+        return res.status(400).json({ message: "Price level already exists" });
+
+      const doc = {
+        companyId,
+        code: code.trim(),
+        name: name.trim(),
+        createdAt: new Date(),
+      };
+
+      const result = await pricelevels.insertOne(doc);
+      res.status(201).json({ _id: result.insertedId, ...doc });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Error creating price level" });
     }
-
-    // Prevent duplicates
-    const exists = await pricelevels.findOne({ companyId, code });
-    if (exists)
-      return res.status(400).json({ message: "Price level already exists" });
-
-    const doc = {
-      companyId,
-      code: code.trim(),
-      name: name.trim(),
-      createdAt: new Date(),
-    };
-
-    const result = await pricelevels.insertOne(doc);
-    res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error creating price level" });
-  }
-});
+  },
+);
 app.get("/companies/:companyId/price-levels", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
   const list = await pricelevels
@@ -9883,45 +10132,53 @@ app.get("/companies/:companyId/price-levels", async (req, res) => {
     .toArray();
   res.json(list);
 });
-app.put("/companies/:companyId/price-levels/:id", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
-  try {
-    const id = new ObjectId(req.params.id);
-    const companyId = new ObjectId(req.params.companyId);
-    const { code, name } = req.body;
+app.put(
+  "/companies/:companyId/price-levels/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.priceManagement),
+  async (req, res) => {
+    try {
+      const id = new ObjectId(req.params.id);
+      const companyId = new ObjectId(req.params.companyId);
+      const { code, name } = req.body;
 
-    await pricelevels.updateOne(
-      { _id: id, companyId },
-      { $set: { code, name } },
-    );
+      await pricelevels.updateOne(
+        { _id: id, companyId },
+        { $set: { code, name } },
+      );
 
-    const updated = await pricelevels.findOne({ _id: id, companyId });
-    res.json(updated);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error updating price level" });
-  }
-});
-app.delete("/companies/:companyId/price-levels/:id", requireCompanyWriteAccess(ROLE_GROUPS.priceManagement), async (req, res) => {
-  try {
-    const id = new ObjectId(req.params.id);
-    const companyId = new ObjectId(req.params.companyId);
-    const existingLevel = await pricelevels.findOne({ _id: id, companyId });
-    if (!existingLevel) {
-      return res.status(404).json({ message: "Price level not found" });
+      const updated = await pricelevels.findOne({ _id: id, companyId });
+      res.json(updated);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Error updating price level" });
     }
-    if (existingLevel.isSystem) {
-      return res
-        .status(400)
-        .json({ message: "System price levels cannot be deleted" });
-    }
+  },
+);
+app.delete(
+  "/companies/:companyId/price-levels/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.priceManagement),
+  async (req, res) => {
+    try {
+      const id = new ObjectId(req.params.id);
+      const companyId = new ObjectId(req.params.companyId);
+      const existingLevel = await pricelevels.findOne({ _id: id, companyId });
+      if (!existingLevel) {
+        return res.status(404).json({ message: "Price level not found" });
+      }
+      if (existingLevel.isSystem) {
+        return res
+          .status(400)
+          .json({ message: "System price levels cannot be deleted" });
+      }
 
-    await pricelevels.deleteOne({ _id: id, companyId });
-    res.json({ message: "Price level deleted" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error deleting price level" });
-  }
-});
+      await pricelevels.deleteOne({ _id: id, companyId });
+      res.json({ message: "Price level deleted" });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Error deleting price level" });
+    }
+  },
+);
 
 async function listNamedMasters(collection, companyId, extraSort = {}) {
   return collection
@@ -10084,11 +10341,13 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
   const phone = normalizePhone(phoneInput);
   if (!phone) return null;
 
-  const vouchers = await Vouchers.find(activeVoucherFilter({
-    companyId,
-    voucherName: { $regex: "^POS Voucher$", $options: "i" },
-    "customerSnapshot.phone": phone,
-  }))
+  const vouchers = await Vouchers.find(
+    activeVoucherFilter({
+      companyId,
+      voucherName: { $regex: "^POS Voucher$", $options: "i" },
+      "customerSnapshot.phone": phone,
+    }),
+  )
     .sort({ date: 1, createdAt: 1 })
     .toArray();
 
@@ -10163,214 +10422,268 @@ app.get("/companies/:companyId/cost-categories", async (req, res) => {
   res.json(await listNamedMasters(CostCategories, companyId, { createdAt: 1 }));
 });
 
-app.post("/companies/:companyId/cost-categories", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const row = await createNamedMaster(CostCategories, companyId, req.body, {
-      duplicateMessage: "Cost category already exists",
-      mapPayload: (payload) => ({
-        alias: normalizeTextBlock(payload.alias),
-        description: normalizeTextBlock(payload.description),
-      }),
-    });
-    res.status(201).json(row);
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-});
-
-app.put("/companies/:companyId/cost-categories/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await updateNamedMaster(
-      CostCategories,
-      companyId,
-      req.params.id,
-      req.body,
-      {
+app.post(
+  "/companies/:companyId/cost-categories",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const row = await createNamedMaster(CostCategories, companyId, req.body, {
         duplicateMessage: "Cost category already exists",
         mapPayload: (payload) => ({
           alias: normalizeTextBlock(payload.alias),
           description: normalizeTextBlock(payload.description),
         }),
-      },
-    );
-    res.json(
-      await CostCategories.findOne({
-        _id: new ObjectId(req.params.id),
-        companyId,
-      }),
-    );
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-});
+      });
+      res.status(201).json(row);
+    } catch (err) {
+      res.status(400).json({ message: err.message });
+    }
+  },
+);
 
-app.delete("/companies/:companyId/cost-categories/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await deleteNamedMaster(CostCategories, companyId, req.params.id);
-    res.json({ message: "Cost category deleted" });
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-});
+app.put(
+  "/companies/:companyId/cost-categories/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await updateNamedMaster(
+        CostCategories,
+        companyId,
+        req.params.id,
+        req.body,
+        {
+          duplicateMessage: "Cost category already exists",
+          mapPayload: (payload) => ({
+            alias: normalizeTextBlock(payload.alias),
+            description: normalizeTextBlock(payload.description),
+          }),
+        },
+      );
+      res.json(
+        await CostCategories.findOne({
+          _id: new ObjectId(req.params.id),
+          companyId,
+        }),
+      );
+    } catch (err) {
+      res.status(400).json({ message: err.message });
+    }
+  },
+);
+
+app.delete(
+  "/companies/:companyId/cost-categories/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await deleteNamedMaster(CostCategories, companyId, req.params.id);
+      res.json({ message: "Cost category deleted" });
+    } catch (err) {
+      res.status(400).json({ message: err.message });
+    }
+  },
+);
 
 app.get("/companies/:companyId/cost-centres", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
   res.json(await listNamedMasters(CostCentres, companyId, { createdAt: 1 }));
 });
 
-app.post("/companies/:companyId/cost-centres", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const row = await createNamedMaster(CostCentres, companyId, req.body, {
-      duplicateMessage: "Cost centre already exists",
-      mapPayload: (payload) => ({
-        alias: normalizeTextBlock(payload.alias),
-        description: normalizeTextBlock(payload.description),
-      }),
-    });
-    res.status(201).json(row);
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-});
+app.post(
+  "/companies/:companyId/cost-centres",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const row = await createNamedMaster(CostCentres, companyId, req.body, {
+        duplicateMessage: "Cost centre already exists",
+        mapPayload: (payload) => ({
+          alias: normalizeTextBlock(payload.alias),
+          description: normalizeTextBlock(payload.description),
+        }),
+      });
+      res.status(201).json(row);
+    } catch (err) {
+      res.status(400).json({ message: err.message });
+    }
+  },
+);
 
-app.put("/companies/:companyId/cost-centres/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await updateNamedMaster(CostCentres, companyId, req.params.id, req.body, {
-      duplicateMessage: "Cost centre already exists",
-      mapPayload: (payload) => ({
-        alias: normalizeTextBlock(payload.alias),
-        description: normalizeTextBlock(payload.description),
-      }),
-    });
-    res.json(
-      await CostCentres.findOne({
-        _id: new ObjectId(req.params.id),
-        companyId,
-      }),
-    );
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-});
+app.put(
+  "/companies/:companyId/cost-centres/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await updateNamedMaster(CostCentres, companyId, req.params.id, req.body, {
+        duplicateMessage: "Cost centre already exists",
+        mapPayload: (payload) => ({
+          alias: normalizeTextBlock(payload.alias),
+          description: normalizeTextBlock(payload.description),
+        }),
+      });
+      res.json(
+        await CostCentres.findOne({
+          _id: new ObjectId(req.params.id),
+          companyId,
+        }),
+      );
+    } catch (err) {
+      res.status(400).json({ message: err.message });
+    }
+  },
+);
 
-app.delete("/companies/:companyId/cost-centres/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await deleteNamedMaster(CostCentres, companyId, req.params.id);
-    res.json({ message: "Cost centre deleted" });
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-});
+app.delete(
+  "/companies/:companyId/cost-centres/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await deleteNamedMaster(CostCentres, companyId, req.params.id);
+      res.json({ message: "Cost centre deleted" });
+    } catch (err) {
+      res.status(400).json({ message: err.message });
+    }
+  },
+);
 
 app.get("/companies/:companyId/units", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
   res.json(await listNamedMasters(Units, companyId, { createdAt: 1 }));
 });
 
-app.post("/companies/:companyId/units", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const row = await createNamedMaster(Units, companyId, req.body, {
-      duplicateMessage: "Unit already exists",
-      mapPayload: (payload) => ({
-        symbol: normalizeName(payload.symbol),
-        decimalPlaces: Number(payload.decimalPlaces || 2),
-      }),
-    });
-    res.status(201).json(row);
-  } catch (err) {
-    res.status(400).json({ message: err.message || "Unable to create unit" });
-  }
-});
-
-app.put("/companies/:companyId/units/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await updateNamedMaster(Units, companyId, req.params.id, req.body, {
-      duplicateMessage: "Unit already exists",
-      mapPayload: (payload) => ({
-        symbol: normalizeName(payload.symbol),
-        decimalPlaces: Number(payload.decimalPlaces || 2),
-      }),
-    });
-    res.json(
-      await Units.findOne({ _id: new ObjectId(req.params.id), companyId }),
-    );
-  } catch (err) {
-    res.status(400).json({ message: err.message || "Unable to update unit" });
-  }
-});
-
-app.delete("/companies/:companyId/units/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await deleteNamedMaster(Units, companyId, req.params.id, async (row) => {
-      const used = await Items.countDocuments({
-        companyId,
-        $or: [{ unitId: row._id }, { unitOfMeasure: row.name }],
+app.post(
+  "/companies/:companyId/units",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const row = await createNamedMaster(Units, companyId, req.body, {
+        duplicateMessage: "Unit already exists",
+        mapPayload: (payload) => ({
+          symbol: normalizeName(payload.symbol),
+          decimalPlaces: Number(payload.decimalPlaces || 2),
+        }),
       });
-      if (used > 0) throw new Error("Unit is used in stock items");
-    });
-    res.json({ message: "Unit deleted" });
-  } catch (err) {
-    res.status(400).json({ message: err.message || "Unable to delete unit" });
-  }
-});
+      res.status(201).json(row);
+    } catch (err) {
+      res.status(400).json({ message: err.message || "Unable to create unit" });
+    }
+  },
+);
+
+app.put(
+  "/companies/:companyId/units/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await updateNamedMaster(Units, companyId, req.params.id, req.body, {
+        duplicateMessage: "Unit already exists",
+        mapPayload: (payload) => ({
+          symbol: normalizeName(payload.symbol),
+          decimalPlaces: Number(payload.decimalPlaces || 2),
+        }),
+      });
+      res.json(
+        await Units.findOne({ _id: new ObjectId(req.params.id), companyId }),
+      );
+    } catch (err) {
+      res.status(400).json({ message: err.message || "Unable to update unit" });
+    }
+  },
+);
+
+app.delete(
+  "/companies/:companyId/units/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await deleteNamedMaster(Units, companyId, req.params.id, async (row) => {
+        const used = await Items.countDocuments({
+          companyId,
+          $or: [{ unitId: row._id }, { unitOfMeasure: row.name }],
+        });
+        if (used > 0) throw new Error("Unit is used in stock items");
+      });
+      res.json({ message: "Unit deleted" });
+    } catch (err) {
+      res.status(400).json({ message: err.message || "Unable to delete unit" });
+    }
+  },
+);
 
 app.get("/companies/:companyId/godowns", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
   res.json(await listNamedMasters(Godowns, companyId, { createdAt: 1 }));
 });
 
-app.post("/companies/:companyId/godowns", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const row = await createNamedMaster(Godowns, companyId, req.body, {
-      duplicateMessage: "Godown already exists",
-      mapPayload: (payload) => ({
-        alias: normalizeName(payload.alias),
-        address: normalizeName(payload.address),
-      }),
-    });
-    res.status(201).json(row);
-  } catch (err) {
-    res.status(400).json({ message: err.message || "Unable to create godown" });
-  }
-});
+app.post(
+  "/companies/:companyId/godowns",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const row = await createNamedMaster(Godowns, companyId, req.body, {
+        duplicateMessage: "Godown already exists",
+        mapPayload: (payload) => ({
+          alias: normalizeName(payload.alias),
+          address: normalizeName(payload.address),
+        }),
+      });
+      res.status(201).json(row);
+    } catch (err) {
+      res
+        .status(400)
+        .json({ message: err.message || "Unable to create godown" });
+    }
+  },
+);
 
-app.put("/companies/:companyId/godowns/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await updateNamedMaster(Godowns, companyId, req.params.id, req.body, {
-      duplicateMessage: "Godown already exists",
-      mapPayload: (payload) => ({
-        alias: normalizeName(payload.alias),
-        address: normalizeName(payload.address),
-      }),
-    });
-    res.json(
-      await Godowns.findOne({ _id: new ObjectId(req.params.id), companyId }),
-    );
-  } catch (err) {
-    res.status(400).json({ message: err.message || "Unable to update godown" });
-  }
-});
+app.put(
+  "/companies/:companyId/godowns/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await updateNamedMaster(Godowns, companyId, req.params.id, req.body, {
+        duplicateMessage: "Godown already exists",
+        mapPayload: (payload) => ({
+          alias: normalizeName(payload.alias),
+          address: normalizeName(payload.address),
+        }),
+      });
+      res.json(
+        await Godowns.findOne({ _id: new ObjectId(req.params.id), companyId }),
+      );
+    } catch (err) {
+      res
+        .status(400)
+        .json({ message: err.message || "Unable to update godown" });
+    }
+  },
+);
 
-app.delete("/companies/:companyId/godowns/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await deleteNamedMaster(Godowns, companyId, req.params.id);
-    res.json({ message: "Godown deleted" });
-  } catch (err) {
-    res.status(400).json({ message: err.message || "Unable to delete godown" });
-  }
-});
+app.delete(
+  "/companies/:companyId/godowns/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await deleteNamedMaster(Godowns, companyId, req.params.id);
+      res.json({ message: "Godown deleted" });
+    } catch (err) {
+      res
+        .status(400)
+        .json({ message: err.message || "Unable to delete godown" });
+    }
+  },
+);
 
 app.get("/companies/:companyId/stock-categories", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
@@ -10390,79 +10703,97 @@ app.get("/companies/:companyId/stock-categories", async (req, res) => {
   res.json(rows);
 });
 
-app.post("/companies/:companyId/stock-categories", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const row = await createNamedMaster(StockCategories, companyId, req.body, {
-      duplicateMessage: "Stock category already exists",
-      mapPayload: (payload) => ({
-        parentId: payload.parentId ? new ObjectId(payload.parentId) : null,
-      }),
-    });
-    res.status(201).json(row);
-  } catch (err) {
-    res
-      .status(400)
-      .json({ message: err.message || "Unable to create stock category" });
-  }
-});
-
-app.put("/companies/:companyId/stock-categories/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await updateNamedMaster(
-      StockCategories,
-      companyId,
-      req.params.id,
-      req.body,
-      {
-        duplicateMessage: "Stock category already exists",
-        mapPayload: (payload) => ({
-          parentId: payload.parentId ? new ObjectId(payload.parentId) : null,
-        }),
-      },
-    );
-    res.json(
-      await StockCategories.findOne({
-        _id: new ObjectId(req.params.id),
+app.post(
+  "/companies/:companyId/stock-categories",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const row = await createNamedMaster(
+        StockCategories,
         companyId,
-      }),
-    );
-  } catch (err) {
-    res
-      .status(400)
-      .json({ message: err.message || "Unable to update stock category" });
-  }
-});
+        req.body,
+        {
+          duplicateMessage: "Stock category already exists",
+          mapPayload: (payload) => ({
+            parentId: payload.parentId ? new ObjectId(payload.parentId) : null,
+          }),
+        },
+      );
+      res.status(201).json(row);
+    } catch (err) {
+      res
+        .status(400)
+        .json({ message: err.message || "Unable to create stock category" });
+    }
+  },
+);
 
-app.delete("/companies/:companyId/stock-categories/:id", requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await deleteNamedMaster(
-      StockCategories,
-      companyId,
-      req.params.id,
-      async (row) => {
-        const childCount = await StockCategories.countDocuments({
+app.put(
+  "/companies/:companyId/stock-categories/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await updateNamedMaster(
+        StockCategories,
+        companyId,
+        req.params.id,
+        req.body,
+        {
+          duplicateMessage: "Stock category already exists",
+          mapPayload: (payload) => ({
+            parentId: payload.parentId ? new ObjectId(payload.parentId) : null,
+          }),
+        },
+      );
+      res.json(
+        await StockCategories.findOne({
+          _id: new ObjectId(req.params.id),
           companyId,
-          parentId: row._id,
-        });
-        if (childCount > 0)
-          throw new Error("Stock category has child categories");
-        const used = await Items.countDocuments({
-          companyId,
-          $or: [{ stockCategoryId: row._id }, { stockCategory: row.name }],
-        });
-        if (used > 0) throw new Error("Stock category is used in stock items");
-      },
-    );
-    res.json({ message: "Stock category deleted" });
-  } catch (err) {
-    res
-      .status(400)
-      .json({ message: err.message || "Unable to delete stock category" });
-  }
-});
+        }),
+      );
+    } catch (err) {
+      res
+        .status(400)
+        .json({ message: err.message || "Unable to update stock category" });
+    }
+  },
+);
+
+app.delete(
+  "/companies/:companyId/stock-categories/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.inventoryMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await deleteNamedMaster(
+        StockCategories,
+        companyId,
+        req.params.id,
+        async (row) => {
+          const childCount = await StockCategories.countDocuments({
+            companyId,
+            parentId: row._id,
+          });
+          if (childCount > 0)
+            throw new Error("Stock category has child categories");
+          const used = await Items.countDocuments({
+            companyId,
+            $or: [{ stockCategoryId: row._id }, { stockCategory: row.name }],
+          });
+          if (used > 0)
+            throw new Error("Stock category is used in stock items");
+        },
+      );
+      res.json({ message: "Stock category deleted" });
+    } catch (err) {
+      res
+        .status(400)
+        .json({ message: err.message || "Unable to delete stock category" });
+    }
+  },
+);
 
 app.get("/companies/:companyId/currencies", async (req, res) => {
   const companyId = new ObjectId(req.params.companyId);
@@ -10474,88 +10805,100 @@ app.get("/companies/:companyId/currencies", async (req, res) => {
   res.json(rows);
 });
 
-app.post("/companies/:companyId/currencies", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const code = normalizeName(req.body.code);
-    const symbol = normalizeName(req.body.symbol);
-    const name = normalizeName(req.body.name);
-    const decimalPlaces = Number(req.body.decimalPlaces || 2);
-    if (!code || !name) {
-      return res
-        .status(400)
-        .json({ message: "Currency code and name are required" });
+app.post(
+  "/companies/:companyId/currencies",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const code = normalizeName(req.body.code);
+      const symbol = normalizeName(req.body.symbol);
+      const name = normalizeName(req.body.name);
+      const decimalPlaces = Number(req.body.decimalPlaces || 2);
+      if (!code || !name) {
+        return res
+          .status(400)
+          .json({ message: "Currency code and name are required" });
+      }
+
+      const duplicate = await Currencies.findOne({
+        companyId,
+        code: { $regex: `^${escapeRegex(code)}$`, $options: "i" },
+      });
+      if (duplicate) {
+        return res.status(400).json({ message: "Currency already exists" });
+      }
+
+      const doc = {
+        companyId,
+        code,
+        symbol: symbol || code,
+        name,
+        decimalPlaces,
+        isBase: false,
+        createdAt: new Date(),
+      };
+      const result = await Currencies.insertOne(doc);
+      res.status(201).json({ _id: result.insertedId, ...doc });
+    } catch (err) {
+      res.status(500).json({ message: "Unable to create currency" });
     }
+  },
+);
 
-    const duplicate = await Currencies.findOne({
-      companyId,
-      code: { $regex: `^${escapeRegex(code)}$`, $options: "i" },
-    });
-    if (duplicate) {
-      return res.status(400).json({ message: "Currency already exists" });
+app.put(
+  "/companies/:companyId/currencies/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const id = new ObjectId(req.params.id);
+      const existing = await Currencies.findOne({ _id: id, companyId });
+      if (!existing)
+        return res.status(404).json({ message: "Currency not found" });
+      if (existing.isSystem) {
+        return res
+          .status(400)
+          .json({ message: "Base currency cannot be altered here" });
+      }
+
+      const code = normalizeName(req.body.code);
+      const symbol = normalizeName(req.body.symbol);
+      const name = normalizeName(req.body.name);
+      const decimalPlaces = Number(req.body.decimalPlaces || 2);
+      await Currencies.updateOne(
+        { _id: id, companyId },
+        { $set: { code, symbol: symbol || code, name, decimalPlaces } },
+      );
+      res.json(await Currencies.findOne({ _id: id, companyId }));
+    } catch (err) {
+      res.status(500).json({ message: "Unable to update currency" });
     }
+  },
+);
 
-    const doc = {
-      companyId,
-      code,
-      symbol: symbol || code,
-      name,
-      decimalPlaces,
-      isBase: false,
-      createdAt: new Date(),
-    };
-    const result = await Currencies.insertOne(doc);
-    res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (err) {
-    res.status(500).json({ message: "Unable to create currency" });
-  }
-});
-
-app.put("/companies/:companyId/currencies/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const id = new ObjectId(req.params.id);
-    const existing = await Currencies.findOne({ _id: id, companyId });
-    if (!existing)
-      return res.status(404).json({ message: "Currency not found" });
-    if (existing.isSystem) {
-      return res
-        .status(400)
-        .json({ message: "Base currency cannot be altered here" });
+app.delete(
+  "/companies/:companyId/currencies/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const id = new ObjectId(req.params.id);
+      const existing = await Currencies.findOne({ _id: id, companyId });
+      if (!existing)
+        return res.status(404).json({ message: "Currency not found" });
+      if (existing.isBase || existing.isSystem) {
+        return res
+          .status(400)
+          .json({ message: "Base currency cannot be deleted" });
+      }
+      await Currencies.deleteOne({ _id: id, companyId });
+      res.json({ message: "Currency deleted" });
+    } catch (err) {
+      res.status(500).json({ message: "Unable to delete currency" });
     }
-
-    const code = normalizeName(req.body.code);
-    const symbol = normalizeName(req.body.symbol);
-    const name = normalizeName(req.body.name);
-    const decimalPlaces = Number(req.body.decimalPlaces || 2);
-    await Currencies.updateOne(
-      { _id: id, companyId },
-      { $set: { code, symbol: symbol || code, name, decimalPlaces } },
-    );
-    res.json(await Currencies.findOne({ _id: id, companyId }));
-  } catch (err) {
-    res.status(500).json({ message: "Unable to update currency" });
-  }
-});
-
-app.delete("/companies/:companyId/currencies/:id", requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const id = new ObjectId(req.params.id);
-    const existing = await Currencies.findOne({ _id: id, companyId });
-    if (!existing)
-      return res.status(404).json({ message: "Currency not found" });
-    if (existing.isBase || existing.isSystem) {
-      return res
-        .status(400)
-        .json({ message: "Base currency cannot be deleted" });
-    }
-    await Currencies.deleteOne({ _id: id, companyId });
-    res.json({ message: "Currency deleted" });
-  } catch (err) {
-    res.status(500).json({ message: "Unable to delete currency" });
-  }
-});
+  },
+);
 
 app.get("/companies/:companyId/employees", async (req, res) => {
   try {
@@ -10596,168 +10939,213 @@ app.get("/companies/:companyId/employees/:id", async (req, res) => {
   }
 });
 
-app.post("/companies/:companyId/employees", requireCompanyWriteAccess(ROLE_GROUPS.payrollMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const generatedNumber = await generateEmployeeNumber(companyId);
-    const doc = normalizeEmployeePayload(req.body, {
-      employeeNumber: generatedNumber,
-    });
-    const loginEnabled = Boolean(doc.accessControl?.loginEnabled);
-    const username = normalizeTextBlock(doc.accessControl?.username).toLowerCase();
-    const password = normalizeTextBlock(req.body?.accessControl?.password);
-
-    if (loginEnabled && !username) {
-      return res.status(400).json({ message: "Login username is required when employee login is enabled" });
-    }
-    if (loginEnabled && !doc.accessControl?.role) {
-      return res.status(400).json({ message: "Access role is required when employee login is enabled" });
-    }
-    if (loginEnabled && !password) {
-      return res.status(400).json({ message: "Login password is required when employee login is enabled" });
-    }
-
-    const duplicateConditions = [];
-    if (doc.employeeNumber) {
-      duplicateConditions.push({ employeeNumber: doc.employeeNumber });
-    }
-    if (doc.name) {
-      duplicateConditions.push({
-        name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" },
+app.post(
+  "/companies/:companyId/employees",
+  requireCompanyWriteAccess(ROLE_GROUPS.payrollMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const generatedNumber = await generateEmployeeNumber(companyId);
+      const doc = normalizeEmployeePayload(req.body, {
+        employeeNumber: generatedNumber,
       });
-    }
+      const loginEnabled = Boolean(doc.accessControl?.loginEnabled);
+      const username = normalizeTextBlock(
+        doc.accessControl?.username,
+      ).toLowerCase();
+      const password = normalizeTextBlock(req.body?.accessControl?.password);
 
-    const duplicate = duplicateConditions.length
-      ? await Employees.findOne({
-          companyId,
-          $or: duplicateConditions,
-        })
-      : null;
-
-    if (duplicate) {
-      return res.status(400).json({
-        message:
-          "Employee with the same name or employee number already exists",
-      });
-    }
-
-    if (loginEnabled) {
-      const existingUsername = await Employees.findOne({
-        companyId,
-        "accessControl.username": { $regex: `^${escapeRegex(username)}$`, $options: "i" },
-      });
-      if (existingUsername) {
-        return res.status(400).json({ message: "Employee login username already exists in this company" });
+      if (loginEnabled && !username) {
+        return res.status(400).json({
+          message: "Login username is required when employee login is enabled",
+        });
       }
+      if (loginEnabled && !doc.accessControl?.role) {
+        return res.status(400).json({
+          message: "Access role is required when employee login is enabled",
+        });
+      }
+      if (loginEnabled && !password) {
+        return res.status(400).json({
+          message: "Login password is required when employee login is enabled",
+        });
+      }
+
+      const duplicateConditions = [];
+      if (doc.employeeNumber) {
+        duplicateConditions.push({ employeeNumber: doc.employeeNumber });
+      }
+      if (doc.name) {
+        duplicateConditions.push({
+          name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" },
+        });
+      }
+
+      const duplicate = duplicateConditions.length
+        ? await Employees.findOne({
+            companyId,
+            $or: duplicateConditions,
+          })
+        : null;
+
+      if (duplicate) {
+        return res.status(400).json({
+          message:
+            "Employee with the same name or employee number already exists",
+        });
+      }
+
+      if (loginEnabled) {
+        const existingUsername = await Employees.findOne({
+          companyId,
+          "accessControl.username": {
+            $regex: `^${escapeRegex(username)}$`,
+            $options: "i",
+          },
+        });
+        if (existingUsername) {
+          return res.status(400).json({
+            message: "Employee login username already exists in this company",
+          });
+        }
+      }
+
+      const finalDoc = {
+        companyId,
+        ...doc,
+        createdAt: new Date(),
+      };
+      finalDoc.accessControl.username = username;
+      if (loginEnabled) {
+        finalDoc.auth = hashCompanyPassword(password);
+      }
+
+      const result = await Employees.insertOne(finalDoc);
+      res
+        .status(201)
+        .json(sanitizeEmployee({ _id: result.insertedId, ...finalDoc }));
+    } catch (err) {
+      res
+        .status(500)
+        .json({ message: err.message || "Unable to create employee" });
     }
+  },
+);
 
-    const finalDoc = {
-      companyId,
-      ...doc,
-      createdAt: new Date(),
-    };
-    finalDoc.accessControl.username = username;
-    if (loginEnabled) {
-      finalDoc.auth = hashCompanyPassword(password);
-    }
+app.put(
+  "/companies/:companyId/employees/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.payrollMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const id = new ObjectId(req.params.id);
+      const existing = await Employees.findOne({ _id: id, companyId });
+      if (!existing)
+        return res.status(404).json({ message: "Employee not found" });
 
-    const result = await Employees.insertOne(finalDoc);
-    res.status(201).json(sanitizeEmployee({ _id: result.insertedId, ...finalDoc }));
-  } catch (err) {
-    res
-      .status(500)
-      .json({ message: err.message || "Unable to create employee" });
-  }
-});
-
-app.put("/companies/:companyId/employees/:id", requireCompanyWriteAccess(ROLE_GROUPS.payrollMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    const id = new ObjectId(req.params.id);
-    const existing = await Employees.findOne({ _id: id, companyId });
-    if (!existing)
-      return res.status(404).json({ message: "Employee not found" });
-
-    const doc = normalizeEmployeePayload(req.body, {
-      employeeNumber: existing.employeeNumber,
-    });
-    const loginEnabled = Boolean(doc.accessControl?.loginEnabled);
-    const username = normalizeTextBlock(doc.accessControl?.username).toLowerCase();
-    const password = normalizeTextBlock(req.body?.accessControl?.password);
-
-    if (loginEnabled && !username) {
-      return res.status(400).json({ message: "Login username is required when employee login is enabled" });
-    }
-    if (loginEnabled && !doc.accessControl?.role) {
-      return res.status(400).json({ message: "Access role is required when employee login is enabled" });
-    }
-
-    const duplicateConditions = [];
-    if (doc.employeeNumber) {
-      duplicateConditions.push({ employeeNumber: doc.employeeNumber });
-    }
-    if (doc.name) {
-      duplicateConditions.push({
-        name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" },
+      const doc = normalizeEmployeePayload(req.body, {
+        employeeNumber: existing.employeeNumber,
       });
-    }
+      const loginEnabled = Boolean(doc.accessControl?.loginEnabled);
+      const username = normalizeTextBlock(
+        doc.accessControl?.username,
+      ).toLowerCase();
+      const password = normalizeTextBlock(req.body?.accessControl?.password);
 
-    const duplicate = duplicateConditions.length
-      ? await Employees.findOne({
+      if (loginEnabled && !username) {
+        return res.status(400).json({
+          message: "Login username is required when employee login is enabled",
+        });
+      }
+      if (loginEnabled && !doc.accessControl?.role) {
+        return res.status(400).json({
+          message: "Access role is required when employee login is enabled",
+        });
+      }
+
+      const duplicateConditions = [];
+      if (doc.employeeNumber) {
+        duplicateConditions.push({ employeeNumber: doc.employeeNumber });
+      }
+      if (doc.name) {
+        duplicateConditions.push({
+          name: { $regex: `^${escapeRegex(doc.name)}$`, $options: "i" },
+        });
+      }
+
+      const duplicate = duplicateConditions.length
+        ? await Employees.findOne({
+            companyId,
+            _id: { $ne: id },
+            $or: duplicateConditions,
+          })
+        : null;
+
+      if (duplicate) {
+        return res.status(400).json({
+          message:
+            "Employee with the same name or employee number already exists",
+        });
+      }
+
+      if (loginEnabled) {
+        const existingUsername = await Employees.findOne({
           companyId,
           _id: { $ne: id },
-          $or: duplicateConditions,
-        })
-      : null;
-
-    if (duplicate) {
-      return res.status(400).json({
-        message:
-          "Employee with the same name or employee number already exists",
-      });
-    }
-
-    if (loginEnabled) {
-      const existingUsername = await Employees.findOne({
-        companyId,
-        _id: { $ne: id },
-        "accessControl.username": { $regex: `^${escapeRegex(username)}$`, $options: "i" },
-      });
-      if (existingUsername) {
-        return res.status(400).json({ message: "Employee login username already exists in this company" });
+          "accessControl.username": {
+            $regex: `^${escapeRegex(username)}$`,
+            $options: "i",
+          },
+        });
+        if (existingUsername) {
+          return res.status(400).json({
+            message: "Employee login username already exists in this company",
+          });
+        }
       }
+
+      doc.accessControl.username = username;
+      const updatePayload = { ...doc };
+      if (loginEnabled) {
+        updatePayload.auth = password
+          ? hashCompanyPassword(password)
+          : existing.auth || null;
+      } else {
+        updatePayload.auth = null;
+      }
+
+      await Employees.updateOne(
+        { _id: id, companyId },
+        { $set: updatePayload },
+      );
+
+      res.json(
+        sanitizeEmployee(await Employees.findOne({ _id: id, companyId })),
+      );
+    } catch (err) {
+      res
+        .status(500)
+        .json({ message: err.message || "Unable to update employee" });
     }
+  },
+);
 
-    doc.accessControl.username = username;
-    const updatePayload = { ...doc };
-    if (loginEnabled) {
-      updatePayload.auth = password ? hashCompanyPassword(password) : existing.auth || null;
-    } else {
-      updatePayload.auth = null;
+app.delete(
+  "/companies/:companyId/employees/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.payrollMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      await Employees.deleteOne({
+        _id: new ObjectId(req.params.id),
+        companyId,
+      });
+      res.json({ message: "Employee deleted" });
+    } catch (err) {
+      res.status(500).json({ message: "Unable to delete employee" });
     }
-
-    await Employees.updateOne({ _id: id, companyId }, { $set: updatePayload });
-
-    res.json(sanitizeEmployee(await Employees.findOne({ _id: id, companyId })));
-  } catch (err) {
-    res
-      .status(500)
-      .json({ message: err.message || "Unable to update employee" });
-  }
-});
-
-app.delete("/companies/:companyId/employees/:id", requireCompanyWriteAccess(ROLE_GROUPS.payrollMasters), async (req, res) => {
-  try {
-    const companyId = new ObjectId(req.params.companyId);
-    await Employees.deleteOne({
-      _id: new ObjectId(req.params.id),
-      companyId,
-    });
-    res.json({ message: "Employee deleted" });
-  } catch (err) {
-    res.status(500).json({ message: "Unable to delete employee" });
-  }
-});
+  },
+);
 
 app.get("/", (req, res) => {
   res.send("Server is running");
