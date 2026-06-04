@@ -9559,6 +9559,31 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
     });
     const netProfit = snapshot.totals.netProfit;
 
+    let priorNetProfit = 0;
+    if (fromDate) {
+      const priorToDate = dayjs(fromDate).subtract(1, "day").toDate();
+      const priorBalances = summarizeLedgerBalances(
+        ledgers,
+        vouchers,
+        null,
+        priorToDate,
+      );
+      const priorStockSummary = await buildStockSummary(
+        companyId,
+        null,
+        priorToDate,
+      );
+      const priorSnapshot = buildProfitLossSnapshot({
+        balances: priorBalances,
+        vouchers,
+        stockSummary: priorStockSummary,
+        groupMap,
+        fromDate: null,
+        toDate: priorToDate,
+      });
+      priorNetProfit = normalizeMoney(priorSnapshot.totals?.netProfit || 0);
+    }
+
     const profitLossLedger =
       balances.find(
         (ledger) => nameKey(ledger.name || "") === "profit & loss a/c",
@@ -9569,7 +9594,8 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
       null;
     const profitLossOpeningSigned = normalizeMoney(
       Number(profitLossLedger?.openingCredit || 0) -
-        Number(profitLossLedger?.openingDebit || 0),
+        Number(profitLossLedger?.openingDebit || 0) +
+        Number(priorNetProfit || 0),
     );
     const profitLossTransferSigned = normalizeMoney(
       Number(profitLossLedger?.debit || 0) -
