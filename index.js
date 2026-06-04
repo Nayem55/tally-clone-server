@@ -9559,40 +9559,76 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
     });
     const netProfit = snapshot.totals.netProfit;
 
+    const profitLossLedger =
+      balances.find(
+        (ledger) => nameKey(ledger.name || "") === "profit & loss a/c",
+      ) ||
+      ledgers.find(
+        (ledger) => nameKey(ledger.name || "") === "profit & loss a/c",
+      ) ||
+      null;
+    const profitLossOpeningSigned = normalizeMoney(
+      Number(profitLossLedger?.openingCredit || 0) -
+        Number(profitLossLedger?.openingDebit || 0),
+    );
+    const profitLossTransferSigned = normalizeMoney(
+      Number(profitLossLedger?.debit || 0) -
+        Number(profitLossLedger?.credit || 0),
+    );
+    const profitLossBalanceSigned = normalizeMoney(
+      profitLossOpeningSigned + Number(netProfit || 0) - profitLossTransferSigned,
+    );
+
     if (
       stockSummary?.totals?.openingValue ||
       stockSummary?.totals?.closingValue
     ) {
-      const current = {
-        id: "__closing_stock__",
-        groupName: "Closing Stock",
-        parentId: null,
-        nature: "ASSET",
-        openingAmount: 0,
-        amount: 0,
-        ledgers: [],
-        children: [],
-      };
+      const stockInTradeGroup =
+        groups.find((group) =>
+          ["stock-in-trade", "stock in trade"].includes(nameKey(group.name || "")),
+        ) || null;
+      const currentAssetsGroup =
+        groups.find((group) => nameKey(group.name || "") === "current assets") ||
+        null;
+      const stockGroup =
+        stockInTradeGroup || {
+          _id: "__stock_in_trade__",
+          name: "Stock-in-Trade",
+          parentId: currentAssetsGroup?._id || null,
+          nature: "ASSET",
+        };
+
+      const current = ensureAncestorChain(assetNodes, stockGroup, "ASSET");
       current.openingAmount = normalizeMoney(
         current.openingAmount + Number(stockSummary.totals.openingValue || 0),
       );
       current.amount = normalizeMoney(
         current.amount + Number(stockSummary.totals.closingValue || 0),
       );
-      assetNodes.set(String(current.id), current);
+      current.ledgers = [
+        {
+          ledgerId: "__stock_in_trade__",
+          ledgerName: "Stock-in-Trade",
+          openingAmount: normalizeMoney(stockSummary.totals.openingValue || 0),
+          amount: normalizeMoney(stockSummary.totals.closingValue || 0),
+          virtualMode: "stock-in-trade",
+        },
+      ];
     }
 
-    if (netProfit !== 0) {
-      const profitLossLedger =
-        ledgers.find(
-          (ledger) => nameKey(ledger.name || "") === "profit & loss a/c",
-        ) || null;
+    if (
+      profitLossOpeningSigned !== 0 ||
+      netProfit !== 0 ||
+      profitLossTransferSigned !== 0
+    ) {
       const profitLossGroup = groups.find(
         (group) => nameKey(group.name || "") === "profit & loss",
       );
-      const profitLossAmount = normalizeMoney(Math.abs(netProfit));
-      const targetCollection = netProfit >= 0 ? liabilityNodes : assetNodes;
-      const oppositeCollection = netProfit >= 0 ? assetNodes : liabilityNodes;
+      const profitLossAmount = normalizeMoney(Math.abs(profitLossBalanceSigned));
+      const targetCollection =
+        profitLossBalanceSigned >= 0 ? liabilityNodes : assetNodes;
+      const oppositeCollection =
+        profitLossBalanceSigned >= 0 ? assetNodes : liabilityNodes;
       const targetGroupName = profitLossGroup?.name || "Profit & Loss";
       const targetKey = profitLossGroup?._id
         ? String(profitLossGroup._id)
@@ -9602,21 +9638,29 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
         id: profitLossGroup?._id || "__profit_loss_group__",
         groupName: targetGroupName,
         parentId: profitLossGroup?.parentId || null,
-        nature: netProfit >= 0 ? "LIABILITY" : "ASSET",
+        nature: profitLossBalanceSigned >= 0 ? "LIABILITY" : "ASSET",
         openingAmount: 0,
         amount: 0,
         ledgers: [],
         children: [],
       };
+      current.openingAmount = normalizeMoney(Math.abs(profitLossOpeningSigned));
       current.amount = profitLossAmount;
-      current.pnlType = netProfit >= 0 ? "profit" : "loss";
+      current.pnlType = profitLossBalanceSigned >= 0 ? "profit" : "loss";
+      current.pnlDetails = {
+        openingBalance: profitLossOpeningSigned,
+        currentPeriod: normalizeMoney(netProfit || 0),
+        transferred: profitLossTransferSigned,
+        closingBalance: profitLossBalanceSigned,
+      };
       current.ledgers = [
         {
           ledgerId: profitLossLedger?._id || "__profit_loss__",
           ledgerName: profitLossLedger?.name || "Profit & Loss A/c",
-          openingAmount: 0,
+          openingAmount: normalizeMoney(Math.abs(profitLossOpeningSigned)),
           amount: profitLossAmount,
-          pnlType: netProfit >= 0 ? "profit" : "loss",
+          pnlType: profitLossBalanceSigned >= 0 ? "profit" : "loss",
+          pnlDetails: current.pnlDetails,
           virtualMode: "profit-loss",
         },
       ];
