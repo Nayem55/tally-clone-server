@@ -7206,6 +7206,33 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
               )
               .filter(Boolean)
               .join(", ");
+            const otherDebitAccounts = (voucher.lines || [])
+              .filter(
+                (otherLine, otherIndex) =>
+                  otherIndex !== (line.__reportLineIndex ?? lineIndex) &&
+                  String(otherLine.ledgerId) !== String(ledgerId) &&
+                  Number(otherLine.debit || 0) > 0,
+              )
+              .map(
+                (otherLine) =>
+                  ledgerMap.get(String(otherLine.ledgerId)) || "Unknown",
+              )
+              .filter(Boolean)
+              .join(", ");
+            const otherCreditAccounts = (voucher.lines || [])
+              .filter(
+                (otherLine, otherIndex) =>
+                  otherIndex !== (line.__reportLineIndex ?? lineIndex) &&
+                  String(otherLine.ledgerId) !== String(ledgerId) &&
+                  Number(otherLine.credit || 0) > 0,
+              )
+              .map(
+                (otherLine) =>
+                  ledgerMap.get(String(otherLine.ledgerId)) || "Unknown",
+              )
+              .filter(Boolean)
+              .join(", ");
+            const selectedLedgerName = ledger.name || "Selected Ledger";
 
             entries.push({
               voucherId: voucher._id,
@@ -7223,6 +7250,10 @@ app.get("/companies/:companyId/reports/ledger-drilldown", async (req, res) => {
               narration:
                 line.narration || voucher.narration || voucher.note || "",
               counterpart,
+              debitAccountName:
+                debit > 0 ? selectedLedgerName : otherDebitAccounts,
+              creditAccountName:
+                credit > 0 ? selectedLedgerName : otherCreditAccounts,
               itemName: (voucher.inventoryLines || [])
                 .map((inventoryLine) => normalizeName(inventoryLine.itemName))
                 .filter(Boolean)
