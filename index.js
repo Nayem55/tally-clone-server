@@ -2371,7 +2371,11 @@ async function buildInventoryDetailReport(
   );
 
   sortVouchersByDateAscending(vouchers).forEach((voucher) => {
-    const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
+    const partyLedger = resolveMovementAnalysisPartyLedger(
+      voucher,
+      ledgerById,
+      groupsById,
+    );
     const partyLedgerId = String(partyLedger?._id || "");
     const partyGroupId = String(partyLedger?.groupId || "");
     const partyGroupName =
@@ -2791,6 +2795,93 @@ function resolveInventoryPartyLedger(voucher, ledgerById) {
   );
 }
 
+function getLedgerGroupPathKeys(ledger = {}, groupById = new Map()) {
+  const names = [];
+  let current = groupById.get(String(ledger.groupId || ""));
+  while (current) {
+    names.unshift(nameKey(current.name || ""));
+    current = current.parentId ? groupById.get(String(current.parentId)) : null;
+  }
+  return names;
+}
+
+function isReceivableLedger(ledger = {}, groupById = new Map()) {
+  const path = getLedgerGroupPathKeys(ledger, groupById).join(" / ");
+  return (
+    path.includes("sundry debtors") ||
+    path.includes("trade receivable") ||
+    path.includes("receivable")
+  );
+}
+
+function isPayableLedger(ledger = {}, groupById = new Map()) {
+  const path = getLedgerGroupPathKeys(ledger, groupById).join(" / ");
+  return (
+    path.includes("sundry creditors") ||
+    path.includes("trade payable") ||
+    path.includes("payable")
+  );
+}
+
+function isMovementAdjustmentLedger(ledger = {}, groupById = new Map()) {
+  const ledgerKey = nameKey(ledger?.name || "");
+  const path = getLedgerGroupPathKeys(ledger, groupById).join(" / ");
+  return (
+    ["sales", "sales return", "purchase", "purchase return"].includes(
+      ledgerKey,
+    ) ||
+    path.includes("sales accounts") ||
+    path.includes("purchase accounts") ||
+    path.includes("expense") ||
+    path.includes("income")
+  );
+}
+
+function resolveMovementAnalysisPartyLedger(
+  voucher,
+  ledgerById,
+  groupById = new Map(),
+) {
+  const voucherNameKey = nameKey(voucher?.voucherName || "");
+  const lines = Array.isArray(voucher?.lines) ? voucher.lines : [];
+
+  if (voucherNameKey === "credit note") {
+    const creditLedgers = lines
+      .filter((line) => Number(line.credit || 0) > 0)
+      .map((line) => ledgerById.get(String(line.ledgerId || "")))
+      .filter(Boolean);
+
+    return (
+      creditLedgers.find((ledger) => isReceivableLedger(ledger, groupById)) ||
+      creditLedgers
+        .slice()
+        .reverse()
+        .find((ledger) => !isMovementAdjustmentLedger(ledger, groupById)) ||
+      creditLedgers[creditLedgers.length - 1] ||
+      resolveInventoryPartyLedger(voucher, ledgerById)
+    );
+  }
+
+  if (voucherNameKey === "debit note") {
+    const debitLedgers = lines
+      .filter((line) => Number(line.debit || 0) > 0)
+      .map((line) => ledgerById.get(String(line.ledgerId || "")))
+      .filter(Boolean);
+
+    return (
+      debitLedgers.find((ledger) => isPayableLedger(ledger, groupById)) ||
+      debitLedgers
+        .slice()
+        .reverse()
+        .find((ledger) => !isMovementAdjustmentLedger(ledger, groupById)) ||
+      debitLedgers[debitLedgers.length - 1] ||
+      resolveInventoryPartyLedger(voucher, ledgerById)
+    );
+  }
+
+  return resolveInventoryPartyLedger(voucher, ledgerById);
+}
+
 async function buildInventoryMovementDimensionReport(
   companyId,
   fromDate = null,
@@ -3079,7 +3170,11 @@ async function buildInventoryMovementDimensionReport(
         voucherTime >= fromTime &&
         (toTime === null || voucherTime <= toTime));
 
-    const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
+    const partyLedger = resolveMovementAnalysisPartyLedger(
+      voucher,
+      ledgerById,
+      groupById,
+    );
     if (!partyLedger) return;
     const ledgerKey = String(partyLedger._id);
     const state = ledgerStateMap.get(ledgerKey) || {
@@ -3539,7 +3634,11 @@ async function buildPartyMovementDetailReport(
   const ledgerStateMap = new Map();
 
   vouchers.forEach((voucher) => {
-    const partyLedger = resolveInventoryPartyLedger(voucher, ledgerById);
+    const partyLedger = resolveMovementAnalysisPartyLedger(
+      voucher,
+      ledgerById,
+      groupById,
+    );
     if (!partyLedger) return;
 
     const partyLedgerId = String(partyLedger._id || "");
