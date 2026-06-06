@@ -1148,6 +1148,26 @@ function normalizeRole(role = "") {
     .toLowerCase();
 }
 
+function isInactiveAccess(accessControl = {}) {
+  return normalizeName(accessControl?.status) === "inactive";
+}
+
+async function companyHasPasswordAdminLogin(companyId) {
+  return Boolean(
+    await Employees.findOne({
+      companyId,
+      "accessControl.loginEnabled": true,
+      "accessControl.username": { $nin: [null, ""] },
+      "accessControl.role": { $regex: /^admin$/i },
+      "auth.hash": { $nin: [null, ""] },
+      $or: [
+        { "accessControl.status": { $exists: false } },
+        { "accessControl.status": { $not: /^inactive$/i } },
+      ],
+    }),
+  );
+}
+
 const ROLE_GROUPS = {
   companyAdmin: ["admin", "supervisor"],
   accountingMasters: ["admin", "supervisor", "accountant"],
@@ -1167,8 +1187,8 @@ const ROLE_GROUPS = {
 };
 
 async function resolveAuthorizedEmployee(companyId, req) {
-  const employeeCount = await Employees.countDocuments({ companyId });
-  if (employeeCount === 0) {
+  const requiresLogin = await companyHasPasswordAdminLogin(companyId);
+  if (!requiresLogin) {
     return { ok: true, bypass: true, employee: null };
   }
 
@@ -1209,7 +1229,7 @@ async function resolveAuthorizedEmployee(companyId, req) {
     };
   }
 
-  if (normalizeName(employee.accessControl?.status) === "inactive") {
+  if (isInactiveAccess(employee.accessControl)) {
     return {
       ok: false,
       status: 403,
@@ -1513,7 +1533,12 @@ function buildProfitLossSnapshot({
     return false;
   }
 
-  function sumVoucherLedgerMovement(voucher, targetGroupName, side, targetMap = null) {
+  function sumVoucherLedgerMovement(
+    voucher,
+    targetGroupName,
+    side,
+    targetMap = null,
+  ) {
     const cents = (voucher.lines || []).reduce((sum, line) => {
       const ledger = ledgerById.get(String(line.ledgerId || ""));
       if (!ledger || !ledgerBelongsToGroup(ledger, targetGroupName)) {
@@ -1546,7 +1571,11 @@ function buildProfitLossSnapshot({
         ledgerName: row.ledgerName,
         amount: centsToMoney(row.amountCents),
       }))
-      .sort((left, right) => String(left.ledgerName || "").localeCompare(String(right.ledgerName || "")));
+      .sort((left, right) =>
+        String(left.ledgerName || "").localeCompare(
+          String(right.ledgerName || ""),
+        ),
+      );
   }
 
   balances.forEach((ledger) => {
@@ -5089,10 +5118,10 @@ app.post(
 
       const username = normalizeTextBlock(req.body.username).toLowerCase();
       const password = String(req.body.password || "");
-      if (!username || !password) {
+      if (!username) {
         return res
           .status(400)
-          .json({ message: "Username and password are required" });
+          .json({ message: "Please select an employee user" });
       }
 
       const employee = await Employees.findOne({
@@ -5110,13 +5139,20 @@ app.post(
           .json({ message: "Invalid username or password" });
       }
 
-      if (normalizeName(employee.accessControl?.status) === "inactive") {
+      if (isInactiveAccess(employee.accessControl)) {
         return res
           .status(403)
           .json({ message: "This employee login is inactive" });
       }
 
-      if (!verifyCompanyPassword(password, employee.auth || {})) {
+      const employeeHasPassword = Boolean(employee.auth?.hash);
+      if (employeeHasPassword && !password) {
+        return res
+          .status(400)
+          .json({ message: "Password is required for this employee" });
+      }
+
+      if (employeeHasPassword && !verifyCompanyPassword(password, employee.auth || {})) {
         return res
           .status(401)
           .json({ message: "Invalid username or password" });
@@ -9662,7 +9698,9 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
         Number(profitLossLedger?.credit || 0),
     );
     const profitLossBalanceSigned = normalizeMoney(
-      profitLossOpeningSigned + Number(netProfit || 0) - profitLossTransferSigned,
+      profitLossOpeningSigned +
+        Number(netProfit || 0) -
+        profitLossTransferSigned,
     );
 
     if (
@@ -9671,18 +9709,20 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
     ) {
       const stockInTradeGroup =
         groups.find((group) =>
-          ["stock-in-trade", "stock in trade"].includes(nameKey(group.name || "")),
+          ["stock-in-trade", "stock in trade"].includes(
+            nameKey(group.name || ""),
+          ),
         ) || null;
       const currentAssetsGroup =
-        groups.find((group) => nameKey(group.name || "") === "current assets") ||
-        null;
-      const stockGroup =
-        stockInTradeGroup || {
-          _id: "__stock_in_trade__",
-          name: "Stock-in-Trade",
-          parentId: currentAssetsGroup?._id || null,
-          nature: "ASSET",
-        };
+        groups.find(
+          (group) => nameKey(group.name || "") === "current assets",
+        ) || null;
+      const stockGroup = stockInTradeGroup || {
+        _id: "__stock_in_trade__",
+        name: "Stock-in-Trade",
+        parentId: currentAssetsGroup?._id || null,
+        nature: "ASSET",
+      };
 
       const current = ensureAncestorChain(assetNodes, stockGroup, "ASSET");
       current.openingAmount = normalizeMoney(
@@ -9710,7 +9750,9 @@ app.get("/companies/:companyId/reports/balance-sheet", async (req, res) => {
       const profitLossGroup = groups.find(
         (group) => nameKey(group.name || "") === "profit & loss",
       );
-      const profitLossAmount = normalizeMoney(Math.abs(profitLossBalanceSigned));
+      const profitLossAmount = normalizeMoney(
+        Math.abs(profitLossBalanceSigned),
+      );
       const targetCollection =
         profitLossBalanceSigned >= 0 ? liabilityNodes : assetNodes;
       const oppositeCollection =
@@ -11095,12 +11137,6 @@ app.post(
           message: "Access role is required when employee login is enabled",
         });
       }
-      if (loginEnabled && !password) {
-        return res.status(400).json({
-          message: "Login password is required when employee login is enabled",
-        });
-      }
-
       const duplicateConditions = [];
       if (doc.employeeNumber) {
         duplicateConditions.push({ employeeNumber: doc.employeeNumber });
@@ -11146,7 +11182,7 @@ app.post(
         createdAt: new Date(),
       };
       finalDoc.accessControl.username = username;
-      if (loginEnabled) {
+      if (loginEnabled && password) {
         finalDoc.auth = hashCompanyPassword(password);
       }
 
