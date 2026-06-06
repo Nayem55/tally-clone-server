@@ -2845,6 +2845,27 @@ function resolveMovementAnalysisPartyLedger(
   const voucherNameKey = nameKey(voucher?.voucherName || "");
   const lines = Array.isArray(voucher?.lines) ? voucher.lines : [];
 
+  if (
+    voucherNameKey === "sales" ||
+    voucherNameKey === "pos voucher" ||
+    voucherNameKey === "delivery note"
+  ) {
+    const debitLedgers = lines
+      .filter((line) => Number(line.debit || 0) > 0)
+      .map((line) => ledgerById.get(String(line.ledgerId || "")))
+      .filter(Boolean);
+
+    return (
+      debitLedgers.find((ledger) => isReceivableLedger(ledger, groupById)) ||
+      debitLedgers
+        .slice()
+        .reverse()
+        .find((ledger) => !isMovementAdjustmentLedger(ledger, groupById)) ||
+      debitLedgers[debitLedgers.length - 1] ||
+      resolveInventoryPartyLedger(voucher, ledgerById)
+    );
+  }
+
   if (voucherNameKey === "credit note") {
     const creditLedgers = lines
       .filter((line) => Number(line.credit || 0) > 0)
@@ -2853,6 +2874,23 @@ function resolveMovementAnalysisPartyLedger(
 
     return (
       creditLedgers.find((ledger) => isReceivableLedger(ledger, groupById)) ||
+      creditLedgers
+        .slice()
+        .reverse()
+        .find((ledger) => !isMovementAdjustmentLedger(ledger, groupById)) ||
+      creditLedgers[creditLedgers.length - 1] ||
+      resolveInventoryPartyLedger(voucher, ledgerById)
+    );
+  }
+
+  if (voucherNameKey === "purchase" || voucherNameKey === "receipt note") {
+    const creditLedgers = lines
+      .filter((line) => Number(line.credit || 0) > 0)
+      .map((line) => ledgerById.get(String(line.ledgerId || "")))
+      .filter(Boolean);
+
+    return (
+      creditLedgers.find((ledger) => isPayableLedger(ledger, groupById)) ||
       creditLedgers
         .slice()
         .reverse()
