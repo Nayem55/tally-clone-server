@@ -10246,7 +10246,7 @@ app.get("/companies/:companyId/reports/cash-flow", async (req, res) => {
     const fromDate = safeDate(req.query.from);
     const toDate = safeDate(req.query.to);
 
-    const [vouchers, ledgers] = await Promise.all([
+    const [vouchers, ledgers, groups] = await Promise.all([
       Vouchers.find(activeVoucherFilter({ companyId })).toArray(),
       Ledgers.aggregate([
         { $match: { companyId } },
@@ -10260,12 +10260,21 @@ app.get("/companies/:companyId/reports/cash-flow", async (req, res) => {
         },
         { $unwind: { path: "$group", preserveNullAndEmptyArrays: true } },
       ]).toArray(),
+      Groups.find({ companyId }).toArray(),
     ]);
 
+    const groupChildrenMap = buildGroupChildrenMap(groups);
+    const cashBankRootIds = groups
+      .filter((group) =>
+        ["cash-in-hand", "bank accounts"].includes(nameKey(group.name || "")),
+      )
+      .map((group) => group._id);
+    const cashBankGroupIds = new Set(
+      collectDescendantGroupIds(cashBankRootIds, groupChildrenMap),
+    );
+
     const cashBankLedgers = ledgers.filter((row) =>
-      ["cash-in-hand", "bank accounts"].includes(
-        nameKey(row.group?.name || ""),
-      ),
+      cashBankGroupIds.has(String(row.groupId || "")),
     );
     const cashBankIds = new Set(cashBankLedgers.map((row) => String(row._id)));
     const balances = summarizeLedgerBalances(
