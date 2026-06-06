@@ -723,7 +723,7 @@ function voucherMatchesSalesPerson(voucher = {}, salesPersonId = "") {
 
 function isSalesPersonTrackedVoucherName(value = "") {
   const key = normalizeName(value || "").toLowerCase();
-  return key === "sales" || key === "pos voucher";
+  return key === "sales" || key === "pos voucher" || key === "credit note";
 }
 
 function formatProductionNumber(companyName = "", currentCount = 0) {
@@ -2952,6 +2952,8 @@ async function buildInventoryMovementDimensionReport(
     vouchers
       .filter((voucher) => isSalesPersonTrackedVoucherName(voucher.voucherName))
       .forEach((voucher) => {
+        const movement = getPartyMovementDescriptor(voucher.voucherName);
+        if (!movement || movement.bucket !== "outward") return;
         const salesMeta = voucher.salesMeta || {};
         const key = salesPersonKeyFromMeta(salesMeta);
         const employeeName =
@@ -2989,12 +2991,16 @@ async function buildInventoryMovementDimensionReport(
 
         const itemTotals = (voucher.inventoryLines || []).reduce(
           (sum, line) => ({
-            salesQty: normalizeMoney(sum.salesQty + Number(line.qty || 0)),
+            salesQty: normalizeMoney(
+              sum.salesQty + movement.sign * Number(line.qty || 0),
+            ),
             salesValue: 0,
           }),
           { salesQty: 0, salesValue: 0 },
         );
-        const voucherSalesValue = voucherTotalAmount(voucher);
+        const voucherSalesValue = normalizeMoney(
+          movement.sign * voucherTotalAmount(voucher),
+        );
 
         state.metrics.salesQty = normalizeMoney(
           state.metrics.salesQty + itemTotals.salesQty,
@@ -3002,7 +3008,9 @@ async function buildInventoryMovementDimensionReport(
         state.metrics.salesValue = normalizeMoney(
           state.metrics.salesValue + voucherSalesValue,
         );
-        state.metrics.invoiceCount += 1;
+        if (movement.sign > 0) {
+          state.metrics.invoiceCount += 1;
+        }
         state.metrics.customerCount = customerSet.size;
         state.metrics.lastSaleOn =
           !state.metrics.lastSaleOn ||
@@ -3407,12 +3415,16 @@ async function buildSalesPersonDrillReport(
   if (level === "voucher") {
     const rows = [];
     const customerSet = new Set();
+    const invoiceIds = new Set();
     let totalQty = 0;
     let totalValue = 0;
 
     salesVouchers.forEach((voucher) => {
+      const movement = getPartyMovementDescriptor(voucher.voucherName);
+      if (!movement || movement.bucket !== "outward") return;
       const customerKey = customerKeyOfVoucher(voucher);
       if (customerKey) customerSet.add(customerKey);
+      if (movement.sign > 0) invoiceIds.add(String(voucher._id));
 
       (voucher.inventoryLines || []).forEach((line, index) => {
         const item = itemById.get(String(line.itemId)) || {};
@@ -3428,9 +3440,11 @@ async function buildSalesPersonDrillReport(
           return;
         }
 
-        const qty = normalizeMoney(Number(line.qty || 0));
+        const qty = normalizeMoney(movement.sign * Number(line.qty || 0));
         const rate = resolveInventoryLineNetRate(line, 0);
-        const value = resolveInventoryLineNetValue(line, rate);
+        const value = normalizeMoney(
+          movement.sign * resolveInventoryLineNetValue(line, rate),
+        );
         totalQty = normalizeMoney(totalQty + qty);
         totalValue = normalizeMoney(totalValue + value);
 
@@ -3478,7 +3492,7 @@ async function buildSalesPersonDrillReport(
       totals: {
         salesQty: totalQty,
         salesValue: totalValue,
-        invoiceCount: new Set(rows.map((row) => row.voucherId)).size,
+        invoiceCount: invoiceIds.size,
         customerCount: customerSet.size,
       },
     };
@@ -3493,6 +3507,8 @@ async function buildSalesPersonDrillReport(
   };
 
   salesVouchers.forEach((voucher) => {
+    const movement = getPartyMovementDescriptor(voucher.voucherName);
+    if (!movement || movement.bucket !== "outward") return;
     const voucherCustomerKey = customerKeyOfVoucher(voucher);
 
     (voucher.inventoryLines || []).forEach((line) => {
@@ -3514,13 +3530,15 @@ async function buildSalesPersonDrillReport(
       }
       if (requestedItemId && String(line.itemId) !== requestedItemId) return;
 
-      const qty = normalizeMoney(Number(line.qty || 0));
+      const qty = normalizeMoney(movement.sign * Number(line.qty || 0));
       const rate = resolveInventoryLineNetRate(line, 0);
-      const value = resolveInventoryLineNetValue(line, rate);
+      const value = normalizeMoney(
+        movement.sign * resolveInventoryLineNetValue(line, rate),
+      );
 
       totals.salesQty = normalizeMoney(totals.salesQty + qty);
       totals.salesValue = normalizeMoney(totals.salesValue + value);
-      totals.invoiceIds.add(String(voucher._id));
+      if (movement.sign > 0) totals.invoiceIds.add(String(voucher._id));
       if (voucherCustomerKey) totals.customerKeys.add(voucherCustomerKey);
 
       let key = String(line.itemId || "");
@@ -3558,7 +3576,7 @@ async function buildSalesPersonDrillReport(
       state.metrics.salesValue = normalizeMoney(
         state.metrics.salesValue + value,
       );
-      state.invoiceIds.add(String(voucher._id));
+      if (movement.sign > 0) state.invoiceIds.add(String(voucher._id));
       if (voucherCustomerKey) state.customerKeys.add(voucherCustomerKey);
       state.metrics.invoiceCount = state.invoiceIds.size;
       state.metrics.customerCount = state.customerKeys.size;
