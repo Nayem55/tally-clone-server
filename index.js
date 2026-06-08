@@ -5307,7 +5307,10 @@ app.post(
           .json({ message: "Password is required for this employee" });
       }
 
-      if (employeeHasPassword && !verifyCompanyPassword(password, employee.auth || {})) {
+      if (
+        employeeHasPassword &&
+        !verifyCompanyPassword(password, employee.auth || {})
+      ) {
         return res
           .status(401)
           .json({ message: "Invalid username or password" });
@@ -11272,6 +11275,39 @@ app.get("/companies/:companyId/employees/:id", async (req, res) => {
     res.json(sanitizeEmployee(row));
   } catch (err) {
     res.status(500).json({ message: "Unable to load employee" });
+  }
+});
+
+app.get("/api/ogerio-products", async (req, res) => {
+  try {
+    const { brand_code, category_code, limit = 100, start = 2 } = req.query;
+
+    const params = new URLSearchParams({
+      include: "brand,category,photos",
+      limit,
+      start,
+    });
+
+    if (brand_code) params.append("brand_code", brand_code);
+    if (category_code) params.append("category_code", category_code);
+
+    const url = `https://pos.ogerio.com/api/v1/products?${params.toString()}`;
+
+    console.log("Calling:", url);
+
+    const response = await fetch(url, {
+      headers: {
+        "api-key": "g88gcckowsk44ckw0gw8ccggwwo4gsc8sw48gkw8",
+        Accept: "application/json",
+      },
+    });
+
+    const data = await response.json();
+
+    res.json(data);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
   }
 });
 
