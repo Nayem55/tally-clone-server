@@ -6142,8 +6142,7 @@ app.post(
         salesMeta,
         salesLedgerId,
         payments = {},
-        discountType = "fixed",
-        discountValue = 0,
+        additionalAdjustments = [],
         redeemedPoints = 0,
         items = [],
       } = req.body;
@@ -6260,15 +6259,26 @@ app.post(
         (sum, row) => sumMoney(sum, row.amount || 0),
         0,
       );
-      const invoiceDiscount =
-        discountType === "percent"
-          ? multiplyMoney(subtotal, Number(discountValue || 0) / 100)
-          : normalizeMoney(discountValue || 0);
+      const normalizedAdjustments = Array.isArray(additionalAdjustments)
+        ? additionalAdjustments
+            .filter((row) => row?.ledgerId && ObjectId.isValid(row.ledgerId))
+            .map((row) => ({
+              ledgerId: new ObjectId(row.ledgerId),
+              ledgerName: normalizeName(row.ledgerName || ""),
+              nature: "EXPENSE",
+              mode: normalizeName(row.mode || "fixed"),
+              value: normalizeMoney(row.value || 0),
+              amount: normalizeMoney(row.amount || 0),
+            }))
+        : [];
+      const additionalExpenseAmount = normalizedAdjustments.reduce(
+        (sum, row) => sumMoney(sum, row.amount || 0),
+        0,
+      );
       const rewardRedeemed = normalizeMoney(redeemedPoints || 0);
       const totalAmount = subtractMoney(
         subtotal,
-        invoiceDiscount,
-        rewardRedeemed,
+        additionalExpenseAmount,
       );
 
       const cashAmount = normalizeMoney(payments.cash || 0);
@@ -6324,7 +6334,16 @@ app.post(
       lines.push({
         ledgerId: resolvedSalesLedger._id,
         debit: 0,
-        credit: totalAmount,
+        credit: subtotal,
+      });
+      normalizedAdjustments.forEach((row) => {
+        const signedAmount = Number(row.amount || 0);
+        if (!row.ledgerId || signedAmount === 0) return;
+        lines.push({
+          ledgerId: row.ledgerId,
+          debit: signedAmount > 0 ? signedAmount : 0,
+          credit: signedAmount < 0 ? Math.abs(signedAmount) : 0,
+        });
       });
 
       const doc = {
@@ -6343,9 +6362,17 @@ app.post(
           address: customerDoc.address || "",
         },
         posMeta: {
-          discountType,
-          discountValue: normalizeMoney(discountValue || 0),
-          invoiceDiscount,
+          discountType: "fixed",
+          discountValue: 0,
+          invoiceDiscount: 0,
+          additionalAdjustments: normalizedAdjustments,
+          additionalExpenseLedgerId: normalizedAdjustments[0]?.ledgerId || null,
+          additionalExpenseMode:
+            normalizeName(normalizedAdjustments[0]?.mode || "fixed"),
+          additionalExpenseValue: normalizeMoney(
+            normalizedAdjustments[0]?.value || 0,
+          ),
+          additionalExpenseAmount,
           subtotal,
           totalAmount,
           rewardEarned,
@@ -7090,6 +7117,34 @@ app.put(
           discountType: posMeta.discountType || "fixed",
           discountValue: normalizeMoney(posMeta.discountValue || 0),
           invoiceDiscount: normalizeMoney(posMeta.invoiceDiscount || 0),
+          additionalAdjustments: Array.isArray(posMeta.additionalAdjustments)
+            ? posMeta.additionalAdjustments
+                .filter(
+                  (row) => row?.ledgerId && ObjectId.isValid(row.ledgerId),
+                )
+                .map((row) => ({
+                  ledgerId: new ObjectId(row.ledgerId),
+                  ledgerName: normalizeName(row.ledgerName || ""),
+                  nature: normalizeName(row.nature || ""),
+                  mode: normalizeName(row.mode || "fixed"),
+                  value: normalizeMoney(row.value || 0),
+                  amount: normalizeMoney(row.amount || 0),
+                }))
+            : [],
+          additionalExpenseLedgerId:
+            posMeta.additionalExpenseLedgerId &&
+            ObjectId.isValid(posMeta.additionalExpenseLedgerId)
+              ? new ObjectId(posMeta.additionalExpenseLedgerId)
+              : null,
+          additionalExpenseMode: normalizeName(
+            posMeta.additionalExpenseMode || "fixed",
+          ),
+          additionalExpenseValue: normalizeMoney(
+            posMeta.additionalExpenseValue || 0,
+          ),
+          additionalExpenseAmount: normalizeMoney(
+            posMeta.additionalExpenseAmount || 0,
+          ),
           subtotal: normalizeMoney(posMeta.subtotal || 0),
           totalAmount: normalizeMoney(posMeta.totalAmount || 0),
           rewardEarned: normalizeMoney(posMeta.rewardEarned || 0),
