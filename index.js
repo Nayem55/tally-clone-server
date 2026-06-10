@@ -6360,6 +6360,8 @@ app.post(
           name: customerDoc.name,
           phone: customerDoc.phone,
           address: customerDoc.address || "",
+          birthDate: customerDoc.birthDate || "",
+          anniversary: customerDoc.anniversary || "",
         },
         posMeta: {
           discountType: "fixed",
@@ -7053,6 +7055,8 @@ app.put(
           name: normalizeName(customerSnapshot.name || ""),
           phone: normalizePhone(customerSnapshot.phone || ""),
           address: normalizeName(customerSnapshot.address || ""),
+          birthDate: normalizeName(customerSnapshot.birthDate || ""),
+          anniversary: normalizeName(customerSnapshot.anniversary || ""),
         };
       }
       if (commercialMeta) {
@@ -10679,6 +10683,8 @@ async function upsertPosCustomer(companyId, customerInput, purchaseSummary) {
     customerInput?.name || "Walk-in Customer",
   );
   const normalizedAddress = normalizeName(customerInput?.address || "");
+  const normalizedBirthDate = normalizeName(customerInput?.birthDate || "");
+  const normalizedAnniversary = normalizeName(customerInput?.anniversary || "");
   const rewardEarned = normalizeMoney(purchaseSummary.rewardEarned);
   const rewardRedeemed = normalizeMoney(purchaseSummary.rewardRedeemed);
   const totalSpent = normalizeMoney(purchaseSummary.totalAmount);
@@ -10691,6 +10697,8 @@ async function upsertPosCustomer(companyId, customerInput, purchaseSummary) {
       name: normalizedName,
       phone,
       address: normalizedAddress,
+      birthDate: normalizedBirthDate,
+      anniversary: normalizedAnniversary,
       rewardPoints: normalizeMoney(rewardEarned - rewardRedeemed),
       lifetimeRewardEarned: rewardEarned,
       lifetimeRewardRedeemed: rewardRedeemed,
@@ -10715,6 +10723,8 @@ async function upsertPosCustomer(companyId, customerInput, purchaseSummary) {
       $set: {
         name: normalizedName || existing.name,
         address: normalizedAddress || existing.address || "",
+        birthDate: normalizedBirthDate || existing.birthDate || "",
+        anniversary: normalizedAnniversary || existing.anniversary || "",
         lastPurchaseAt: voucherDate,
         updatedAt: new Date(),
         rewardPoints: nextRewardPoints,
@@ -10781,6 +10791,8 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
     ),
     phone,
     address: normalizeName(latestVoucher.customerSnapshot?.address || ""),
+    birthDate: normalizeName(latestVoucher.customerSnapshot?.birthDate || ""),
+    anniversary: normalizeName(latestVoucher.customerSnapshot?.anniversary || ""),
     rewardPoints,
     lifetimeRewardEarned,
     lifetimeRewardRedeemed,
