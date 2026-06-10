@@ -6276,14 +6276,54 @@ app.post(
         0,
       );
       const rewardRedeemed = normalizeMoney(redeemedPoints || 0);
-      const totalAmount = subtractMoney(
-        subtotal,
-        additionalExpenseAmount,
-      );
+      const totalAmount = subtractMoney(subtotal, additionalExpenseAmount);
 
       const cashAmount = normalizeMoney(payments.cash || 0);
-      const cardAmount = normalizeMoney(payments.card || 0);
-      const totalPaid = sumMoney(cashAmount, cardAmount);
+      const rawBankPayments = Array.isArray(payments.bankPayments)
+        ? payments.bankPayments
+        : [];
+      const bankPaymentLedgerIds = rawBankPayments
+        .filter((row) => row?.ledgerId && ObjectId.isValid(row.ledgerId))
+        .map((row) => new ObjectId(row.ledgerId));
+      const bankLedgerDocs =
+        bankPaymentLedgerIds.length > 0
+          ? await Ledgers.find({
+              companyId,
+              _id: { $in: bankPaymentLedgerIds },
+            }).toArray()
+          : [];
+      const bankLedgerMap = new Map(
+        bankLedgerDocs.map((ledger) => [String(ledger._id), ledger]),
+      );
+      const normalizedBankPayments = rawBankPayments
+        .filter((row) => row?.ledgerId && ObjectId.isValid(row.ledgerId))
+        .map((row) => {
+          const ledger = bankLedgerMap.get(String(row.ledgerId));
+          return {
+            ledgerId: new ObjectId(row.ledgerId),
+            ledgerName: normalizeName(ledger?.name || row.ledgerName || ""),
+            amount: normalizeMoney(row.amount || 0),
+          };
+        })
+        .filter((row) => row.amount > 0);
+      const legacyCardAmount = normalizeMoney(payments.card || 0);
+      if (legacyCardAmount > 0 && normalizedBankPayments.length === 0) {
+        if (!bankLedger) {
+          return res
+            .status(400)
+            .json({ message: "Bank ledger is missing for POS bank payment" });
+        }
+        normalizedBankPayments.push({
+          ledgerId: bankLedger._id,
+          ledgerName: normalizeName(bankLedger.name || "Bank"),
+          amount: legacyCardAmount,
+        });
+      }
+      const bankAmount = normalizedBankPayments.reduce(
+        (sum, row) => sumMoney(sum, row.amount || 0),
+        0,
+      );
+      const totalPaid = sumMoney(cashAmount, bankAmount);
 
       if (!moneyEquals(totalPaid, totalAmount)) {
         return res
@@ -6323,14 +6363,9 @@ app.post(
         }
         lines.push({ ledgerId: cashLedger._id, debit: cashAmount, credit: 0 });
       }
-      if (cardAmount > 0) {
-        if (!bankLedger) {
-          return res
-            .status(400)
-            .json({ message: "Bank ledger is missing for POS card payment" });
-        }
-        lines.push({ ledgerId: bankLedger._id, debit: cardAmount, credit: 0 });
-      }
+      normalizedBankPayments.forEach((row) => {
+        lines.push({ ledgerId: row.ledgerId, debit: row.amount, credit: 0 });
+      });
       lines.push({
         ledgerId: resolvedSalesLedger._id,
         debit: 0,
@@ -6369,8 +6404,9 @@ app.post(
           invoiceDiscount: 0,
           additionalAdjustments: normalizedAdjustments,
           additionalExpenseLedgerId: normalizedAdjustments[0]?.ledgerId || null,
-          additionalExpenseMode:
-            normalizeName(normalizedAdjustments[0]?.mode || "fixed"),
+          additionalExpenseMode: normalizeName(
+            normalizedAdjustments[0]?.mode || "fixed",
+          ),
           additionalExpenseValue: normalizeMoney(
             normalizedAdjustments[0]?.value || 0,
           ),
@@ -6380,7 +6416,8 @@ app.post(
           rewardEarned,
           rewardRedeemed,
           cashAmount,
-          cardAmount,
+          cardAmount: bankAmount,
+          bankPayments: normalizedBankPayments,
           cashTendered: normalizeMoney(payments.cashTendered || 0),
           changeAmount: subtractMoney(payments.cashTendered || 0, cashAmount),
         },
@@ -7155,6 +7192,17 @@ app.put(
           rewardRedeemed: normalizeMoney(posMeta.rewardRedeemed || 0),
           cashAmount: normalizeMoney(posMeta.cashAmount || 0),
           cardAmount: normalizeMoney(posMeta.cardAmount || 0),
+          bankPayments: Array.isArray(posMeta.bankPayments)
+            ? posMeta.bankPayments
+                .filter(
+                  (row) => row?.ledgerId && ObjectId.isValid(row.ledgerId),
+                )
+                .map((row) => ({
+                  ledgerId: new ObjectId(row.ledgerId),
+                  ledgerName: normalizeName(row.ledgerName || ""),
+                  amount: normalizeMoney(row.amount || 0),
+                }))
+            : [],
           cashTendered: normalizeMoney(posMeta.cashTendered || 0),
           changeAmount: normalizeMoney(posMeta.changeAmount || 0),
         };
@@ -10792,7 +10840,9 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
     phone,
     address: normalizeName(latestVoucher.customerSnapshot?.address || ""),
     birthDate: normalizeName(latestVoucher.customerSnapshot?.birthDate || ""),
-    anniversary: normalizeName(latestVoucher.customerSnapshot?.anniversary || ""),
+    anniversary: normalizeName(
+      latestVoucher.customerSnapshot?.anniversary || "",
+    ),
     rewardPoints,
     lifetimeRewardEarned,
     lifetimeRewardRedeemed,
@@ -11594,4 +11644,4 @@ connectDb()
   .catch((err) => {
     console.error("Failed to connect DB:", err);
     process.exit(1);
-  });
+  }); 
