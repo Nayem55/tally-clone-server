@@ -6038,7 +6038,7 @@ app.get("/companies/:companyId/customers", async (req, res) => {
     const limit = Math.min(Number(req.query.limit || 20), 100);
     const phone = normalizePhone(req.query.phone);
     const query = normalizeName(req.query.q || "");
-    const filter = { companyId };
+    const filter = {};
 
     if (phone) {
       filter.phone = { $regex: phone };
@@ -6051,12 +6051,52 @@ app.get("/companies/:companyId/customers", async (req, res) => {
       ];
     }
 
-    const rows = await Customers.find(filter)
+    const [rows, companies] = await Promise.all([
+      Customers.find(filter)
       .sort({ lastPurchaseAt: -1, name: 1 })
-      .limit(limit)
-      .toArray();
+      .limit(Math.max(limit * 5, 100))
+      .toArray(),
+      Companies.find({}, { projection: { name: 1 } }).toArray(),
+    ]);
 
-    res.json(rows);
+    const companyNameById = new Map(
+      companies.map((company) => [String(company._id), company.name || ""]),
+    );
+    const dedupedByPhone = new Map();
+
+    rows.forEach((row) => {
+      const key = normalizePhone(row.phone || "") || String(row._id);
+      const existing = dedupedByPhone.get(key);
+      const currentRowCompanyId = String(row.companyId || "");
+      const existingCompanyId = String(existing?.companyId || "");
+
+      if (!existing) {
+        dedupedByPhone.set(key, row);
+        return;
+      }
+
+      if (currentRowCompanyId === String(companyId) && existingCompanyId !== String(companyId)) {
+        dedupedByPhone.set(key, row);
+        return;
+      }
+
+      const currentUpdatedAt = new Date(row.updatedAt || row.lastPurchaseAt || 0).getTime();
+      const existingUpdatedAt = new Date(
+        existing.updatedAt || existing.lastPurchaseAt || 0,
+      ).getTime();
+      if (currentUpdatedAt > existingUpdatedAt) {
+        dedupedByPhone.set(key, row);
+      }
+    });
+
+    const result = Array.from(dedupedByPhone.values())
+      .slice(0, limit)
+      .map((row) => ({
+        ...row,
+        companyName: companyNameById.get(String(row.companyId || "")) || "",
+      }));
+
+    res.json(result);
   } catch (err) {
     console.error("Error loading customers:", err);
     res.status(500).json({ message: "Error loading customers" });
@@ -6157,6 +6197,8 @@ app.post(
         payments = {},
         additionalAdjustments = [],
         redeemedPoints = 0,
+        redeemLedgerId = null,
+        redeemLedgerName = "",
         items = [],
       } = req.body;
 
@@ -6289,7 +6331,17 @@ app.post(
         0,
       );
       const rewardRedeemed = normalizeMoney(redeemedPoints || 0);
-      const totalAmount = subtractMoney(subtotal, additionalExpenseAmount);
+      const redeemLedgerDoc =
+        redeemLedgerId && ObjectId.isValid(redeemLedgerId)
+          ? await Ledgers.findOne({
+              companyId,
+              _id: new ObjectId(redeemLedgerId),
+            })
+          : null;
+      const totalAmount = subtractMoney(
+        subtractMoney(subtotal, additionalExpenseAmount),
+        rewardRedeemed,
+      );
 
       const cashAmount = normalizeMoney(payments.cash || 0);
       const rawBankPayments = Array.isArray(payments.bankPayments)
@@ -6391,6 +6443,18 @@ app.post(
           credit: signedAmount < 0 ? Math.abs(signedAmount) : 0,
         });
       });
+      if (rewardRedeemed > 0) {
+        if (!redeemLedgerDoc) {
+          return res.status(400).json({
+            message: "Redeem discount ledger is required when redeem points are used",
+          });
+        }
+        lines.push({
+          ledgerId: redeemLedgerDoc._id,
+          debit: rewardRedeemed,
+          credit: 0,
+        });
+      }
 
       const doc = {
         companyId,
@@ -6422,6 +6486,11 @@ app.post(
             normalizedAdjustments[0]?.value || 0,
           ),
           additionalExpenseAmount,
+          redeemLedgerId: redeemLedgerDoc?._id || null,
+          redeemLedgerName: normalizeName(
+            redeemLedgerDoc?.name || redeemLedgerName || "",
+          ),
+          redeemAmount: rewardRedeemed,
           subtotal,
           totalAmount,
           rewardEarned,
@@ -7197,6 +7266,12 @@ app.put(
           additionalExpenseAmount: normalizeMoney(
             posMeta.additionalExpenseAmount || 0,
           ),
+          redeemLedgerId:
+            posMeta.redeemLedgerId && ObjectId.isValid(posMeta.redeemLedgerId)
+              ? new ObjectId(posMeta.redeemLedgerId)
+              : null,
+          redeemLedgerName: normalizeName(posMeta.redeemLedgerName || ""),
+          redeemAmount: normalizeMoney(posMeta.redeemAmount || 0),
           subtotal: normalizeMoney(posMeta.subtotal || 0),
           totalAmount: normalizeMoney(posMeta.totalAmount || 0),
           rewardEarned: normalizeMoney(posMeta.rewardEarned || 0),
