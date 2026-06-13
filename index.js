@@ -6696,7 +6696,6 @@ app.get(
   "/companies/:companyId/reports/customer-behaviour/product-wise",
   async (req, res) => {
     try {
-      const companyId = new ObjectId(req.params.companyId);
       const itemId =
         req.query.itemId && ObjectId.isValid(req.query.itemId)
           ? new ObjectId(req.query.itemId)
@@ -6704,7 +6703,6 @@ app.get(
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       const voucherFilter = {
-        companyId,
         voucherName: { $regex: "^POS Voucher$", $options: "i" },
       };
       if (fromDate || toDate) {
@@ -6716,9 +6714,16 @@ app.get(
           voucherFilter.date.$lte = inclusiveTo;
         }
       }
-      const vouchers = await Vouchers.find(activeVoucherFilter(voucherFilter))
-        .sort({ date: -1 })
-        .toArray();
+      const [vouchers, companies] = await Promise.all([
+        Vouchers.find(activeVoucherFilter(voucherFilter))
+          .sort({ date: -1 })
+          .toArray(),
+        Companies.find({}, { projection: { name: 1 } }).toArray(),
+      ]);
+
+      const companyNameById = new Map(
+        companies.map((company) => [String(company._id), company.name || ""]),
+      );
 
       const productMap = new Map();
       vouchers.forEach((voucher) => {
@@ -6748,6 +6753,8 @@ app.get(
             customerName: voucher.customerSnapshot?.name || "",
             phone: voucher.customerSnapshot?.phone || "",
             address: voucher.customerSnapshot?.address || "",
+            companyName:
+              companyNameById.get(String(voucher.companyId || "")) || "",
             voucherId: voucher._id,
             voucherNo: voucher.number || "",
             purchaseDate: voucher.date,
@@ -6786,10 +6793,8 @@ app.get(
   "/companies/:companyId/reports/customer-behaviour/stock-group-wise",
   async (req, res) => {
     try {
-      const companyId = new ObjectId(req.params.companyId);
       const vouchers = await Vouchers.find(
         activeVoucherFilter({
-          companyId,
           voucherName: { $regex: "^POS Voucher$", $options: "i" },
         }),
       )
@@ -6865,10 +6870,8 @@ app.get(
   "/companies/:companyId/reports/customer-behaviour/category-wise",
   async (req, res) => {
     try {
-      const companyId = new ObjectId(req.params.companyId);
       const vouchers = await Vouchers.find(
         activeVoucherFilter({
-          companyId,
           voucherName: { $regex: "^POS Voucher$", $options: "i" },
         }),
       )
