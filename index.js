@@ -6530,7 +6530,6 @@ app.get(
       const fromDate = safeDate(req.query.from);
       const toDate = safeDate(req.query.to);
       const voucherFilter = {
-        companyId,
         voucherName: { $regex: "^POS Voucher$", $options: "i" },
       };
       if (fromDate || toDate) {
@@ -6543,19 +6542,56 @@ app.get(
         }
       }
 
-      const [customers, vouchers] = await Promise.all([
-        Customers.find({ companyId })
+      const [customers, vouchers, allPosVouchers, companies] = await Promise.all([
+        Customers.find({})
           .sort({ lastPurchaseAt: -1, name: 1 })
           .toArray(),
         Vouchers.find(activeVoucherFilter(voucherFilter))
           .sort({ date: -1 })
           .toArray(),
+        Vouchers.find(
+          activeVoucherFilter({
+            voucherName: { $regex: "^POS Voucher$", $options: "i" },
+          }),
+        ).toArray(),
+        Companies.find({}, { projection: { name: 1 } }).toArray(),
       ]);
 
-      const uniqueCustomerIds = new Set(
+      const companyNameById = new Map(
+        companies.map((company) => [String(company._id), company.name || ""]),
+      );
+      const dedupedCustomersByPhone = new Map();
+      customers.forEach((customer) => {
+        const phoneKey = normalizePhone(customer.phone || "") || String(customer._id);
+        const existing = dedupedCustomersByPhone.get(phoneKey);
+        if (!existing) {
+          dedupedCustomersByPhone.set(phoneKey, customer);
+          return;
+        }
+        const currentCompanyId = String(customer.companyId || "");
+        const existingCompanyId = String(existing.companyId || "");
+        if (
+          currentCompanyId === String(companyId) &&
+          existingCompanyId !== String(companyId)
+        ) {
+          dedupedCustomersByPhone.set(phoneKey, customer);
+          return;
+        }
+        const currentUpdatedAt = new Date(
+          customer.updatedAt || customer.lastPurchaseAt || 0,
+        ).getTime();
+        const existingUpdatedAt = new Date(
+          existing.updatedAt || existing.lastPurchaseAt || 0,
+        ).getTime();
+        if (currentUpdatedAt > existingUpdatedAt) {
+          dedupedCustomersByPhone.set(phoneKey, customer);
+        }
+      });
+
+      const uniqueCustomerPhones = new Set(
         vouchers
-          .filter((voucher) => voucher.customerId)
-          .map((voucher) => String(voucher.customerId)),
+          .map((voucher) => normalizePhone(voucher.customerSnapshot?.phone || ""))
+          .filter(Boolean),
       );
       const totalSales = normalizeMoney(
         vouchers.reduce(
@@ -6575,12 +6611,29 @@ app.get(
           0,
         ),
       );
+      const rewardSummaryByPhone = new Map();
+      allPosVouchers.forEach((voucher) => {
+        const phoneKey = normalizePhone(voucher.customerSnapshot?.phone || "");
+        if (!phoneKey) return;
+        const current = rewardSummaryByPhone.get(phoneKey) || {
+          earned: 0,
+          redeemed: 0,
+        };
+        current.earned += Number(voucher.posMeta?.rewardEarned || 0);
+        current.redeemed += Number(voucher.posMeta?.rewardRedeemed || 0);
+        rewardSummaryByPhone.set(phoneKey, current);
+      });
 
-      const customerRows = customers.map((customer) => {
+      const customerRows = Array.from(dedupedCustomersByPhone.values()).map((customer) => {
+        const phoneKey = normalizePhone(customer.phone || "");
         const customerVouchers = vouchers.filter(
           (voucher) =>
-            String(voucher.customerId || "") === String(customer._id),
+            normalizePhone(voucher.customerSnapshot?.phone || "") === phoneKey,
         );
+        const rewardSummary = rewardSummaryByPhone.get(phoneKey) || {
+          earned: 0,
+          redeemed: 0,
+        };
         const spent = normalizeMoney(
           customerVouchers.reduce(
             (sum, voucher) => sum + Number(voucher.posMeta?.totalAmount || 0),
@@ -6588,11 +6641,14 @@ app.get(
           ),
         );
         return {
-          customerId: customer._id,
+          customerId: phoneKey || customer._id,
           name: customer.name,
           phone: customer.phone,
           address: customer.address || "",
-          rewardPoints: normalizeMoney(customer.rewardPoints || 0),
+          rewardPoints: normalizeMoney(
+            Number(rewardSummary.earned || 0) -
+              Number(rewardSummary.redeemed || 0),
+          ),
           totalOrders: customerVouchers.length,
           totalSpent: spent,
           averageOrderValue: customerVouchers.length
@@ -6600,13 +6656,15 @@ app.get(
             : 0,
           lastPurchaseAt:
             customerVouchers[0]?.date || customer.lastPurchaseAt || null,
+          companyName:
+            companyNameById.get(String(customer.companyId || "")) || "",
         };
       });
 
       res.json({
         summary: {
-          totalCustomers: customers.length,
-          activeCustomers: uniqueCustomerIds.size,
+          totalCustomers: dedupedCustomersByPhone.size,
+          activeCustomers: uniqueCustomerPhones.size,
           totalOrders: vouchers.length,
           totalSales,
           totalRewardsEarned,
@@ -6621,6 +6679,8 @@ app.get(
           phone: voucher.customerSnapshot?.phone || "",
           totalAmount: normalizeMoney(voucher.posMeta?.totalAmount || 0),
           rewardEarned: normalizeMoney(voucher.posMeta?.rewardEarned || 0),
+          companyName:
+            companyNameById.get(String(voucher.companyId || "")) || "",
         })),
       });
     } catch (err) {
