@@ -6074,18 +6074,25 @@ app.get(
         return res.json({ customer: null, purchases: [] });
       }
 
-      const [customer, vouchers] = await Promise.all([
-        Customers.findOne({ companyId, phone }),
-        Vouchers.find(
-          activeVoucherFilter({
-            companyId,
-            voucherName: { $regex: "^POS Voucher$", $options: "i" },
-            "customerSnapshot.phone": phone,
-          }),
-        )
-          .sort({ date: -1, createdAt: -1, _id: -1 })
-          .toArray(),
-      ]);
+      const [currentCompanyCustomer, anyCustomer, vouchers, companies] =
+        await Promise.all([
+          Customers.findOne({ companyId, phone }),
+          Customers.findOne({ phone }, { sort: { updatedAt: -1, createdAt: -1 } }),
+          Vouchers.find(
+            activeVoucherFilter({
+              voucherName: { $regex: "^POS Voucher$", $options: "i" },
+              "customerSnapshot.phone": phone,
+            }),
+          )
+            .sort({ date: -1, createdAt: -1, _id: -1 })
+            .toArray(),
+          Companies.find({}, { projection: { name: 1 } }).toArray(),
+        ]);
+
+      const customer = currentCompanyCustomer || anyCustomer || null;
+      const companyNameById = new Map(
+        companies.map((company) => [String(company._id), company.name || ""]),
+      );
 
       const purchases = [];
       vouchers.forEach((voucher) => {
@@ -6097,6 +6104,9 @@ app.get(
             voucherId: voucher._id,
             voucherNumber: voucher.number || "",
             purchaseDate,
+            companyId: voucher.companyId || null,
+            companyName:
+              companyNameById.get(String(voucher.companyId || "")) || "",
             itemId: line.itemId || null,
             itemName: line.itemName || "",
             qty: normalizeMoney(line.qty || line.billedQty || 0),
