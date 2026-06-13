@@ -6074,7 +6074,7 @@ app.get(
         return res.json({ customer: null, purchases: [] });
       }
 
-      const [currentCompanyCustomer, anyCustomer, vouchers, companies] =
+      const [currentCompanyCustomer, anyCustomer, vouchers, companies, rewardSummary] =
         await Promise.all([
           Customers.findOne({ companyId, phone }),
           Customers.findOne({ phone }, { sort: { updatedAt: -1, createdAt: -1 } }),
@@ -6087,6 +6087,7 @@ app.get(
             .sort({ date: -1, createdAt: -1, _id: -1 })
             .toArray(),
           Companies.find({}, { projection: { name: 1 } }).toArray(),
+          buildGlobalPosCustomerRewardSummary(phone),
         ]);
 
       const customer = currentCompanyCustomer || anyCustomer || null;
@@ -6121,7 +6122,9 @@ app.get(
               name: customer.name || "",
               phone: customer.phone || "",
               address: customer.address || "",
-              rewardPoints: normalizeMoney(customer.rewardPoints || 0),
+              rewardPoints: normalizeMoney(
+                rewardSummary.rewardPoints ?? customer.rewardPoints ?? 0,
+              ),
             }
           : null,
         purchases,
@@ -6347,11 +6350,9 @@ app.post(
         0,
       );
 
-      const existingCustomer = await Customers.findOne({
-        companyId,
-        phone: normalizedPhone,
-      });
-      if (rewardRedeemed > Number(existingCustomer?.rewardPoints || 0)) {
+      const rewardSummary =
+        await buildGlobalPosCustomerRewardSummary(normalizedPhone);
+      if (rewardRedeemed > Number(rewardSummary.rewardPoints || 0)) {
         return res
           .status(400)
           .json({ message: "Customer does not have enough reward points" });
@@ -7356,6 +7357,12 @@ app.delete(
           },
         },
       );
+      if (nameKey(existingVoucher.voucherName || "") === "pos voucher") {
+        await rebuildPosCustomerFromVouchers(
+          companyId,
+          existingVoucher.customerSnapshot?.phone,
+        );
+      }
       await logAuditEvent({
         companyId,
         entityType: "voucher",
@@ -10768,7 +10775,8 @@ async function upsertPosCustomer(companyId, customerInput, purchaseSummary) {
       updatedAt: new Date(),
     };
     const result = await Customers.insertOne(doc);
-    return { _id: result.insertedId, ...doc };
+    await syncGlobalPosCustomerRewards(phone);
+    return await Customers.findOne({ _id: result.insertedId, companyId });
   }
 
   const nextRewardPoints = normalizeMoney(
@@ -10796,7 +10804,68 @@ async function upsertPosCustomer(companyId, customerInput, purchaseSummary) {
     },
   );
 
+  await syncGlobalPosCustomerRewards(phone);
   return await Customers.findOne({ _id: existing._id, companyId });
+}
+
+async function buildGlobalPosCustomerRewardSummary(phoneInput) {
+  const phone = normalizePhone(phoneInput);
+  if (!phone) {
+    return {
+      phone: "",
+      rewardPoints: 0,
+      lifetimeRewardEarned: 0,
+      lifetimeRewardRedeemed: 0,
+    };
+  }
+
+  const vouchers = await Vouchers.find(
+    activeVoucherFilter({
+      voucherName: { $regex: "^POS Voucher$", $options: "i" },
+      "customerSnapshot.phone": phone,
+    }),
+  ).toArray();
+
+  const lifetimeRewardEarned = normalizeMoney(
+    vouchers.reduce(
+      (sum, voucher) => sum + Number(voucher.posMeta?.rewardEarned || 0),
+      0,
+    ),
+  );
+  const lifetimeRewardRedeemed = normalizeMoney(
+    vouchers.reduce(
+      (sum, voucher) => sum + Number(voucher.posMeta?.rewardRedeemed || 0),
+      0,
+    ),
+  );
+
+  return {
+    phone,
+    rewardPoints: normalizeMoney(
+      lifetimeRewardEarned - lifetimeRewardRedeemed,
+    ),
+    lifetimeRewardEarned,
+    lifetimeRewardRedeemed,
+  };
+}
+
+async function syncGlobalPosCustomerRewards(phoneInput) {
+  const summary = await buildGlobalPosCustomerRewardSummary(phoneInput);
+  if (!summary.phone) return summary;
+
+  await Customers.updateMany(
+    { phone: summary.phone },
+    {
+      $set: {
+        rewardPoints: summary.rewardPoints,
+        lifetimeRewardEarned: summary.lifetimeRewardEarned,
+        lifetimeRewardRedeemed: summary.lifetimeRewardRedeemed,
+        updatedAt: new Date(),
+      },
+    },
+  );
+
+  return summary;
 }
 
 async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
@@ -10815,6 +10884,7 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
 
   if (vouchers.length === 0) {
     await Customers.deleteOne({ companyId, phone });
+    await syncGlobalPosCustomerRewards(phone);
     return null;
   }
 
@@ -10872,6 +10942,7 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
         $setOnInsert: { createdAt: existing.createdAt || new Date() },
       },
     );
+    await syncGlobalPosCustomerRewards(phone);
     return Customers.findOne({ _id: existing._id, companyId });
   }
 
@@ -10880,6 +10951,7 @@ async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
     createdAt: new Date(),
   };
   const result = await Customers.insertOne(insertDoc);
+  await syncGlobalPosCustomerRewards(phone);
   return { _id: result.insertedId, ...insertDoc };
 }
 
