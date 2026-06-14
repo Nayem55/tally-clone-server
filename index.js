@@ -95,6 +95,7 @@ let Companies,
   Employees,
   Items,
   pricelevels,
+  GiftVouchers,
   Currencies,
   CostCategories,
   CostCentres,
@@ -4612,6 +4613,7 @@ async function connectDb() {
   Employees = db.collection("employees");
   Items = db.collection("items");
   pricelevels = db.collection("pricelevels");
+  GiftVouchers = db.collection("giftVouchers");
   Currencies = db.collection("currencies");
   CostCategories = db.collection("costCategories");
   CostCentres = db.collection("costCentres");
@@ -6196,6 +6198,7 @@ app.post(
         salesLedgerId,
         payments = {},
         additionalAdjustments = [],
+        giftVoucherAdjustments = [],
         redeemedPoints = 0,
         redeemLedgerId = null,
         redeemLedgerName = "",
@@ -6330,6 +6333,87 @@ app.post(
         (sum, row) => sumMoney(sum, row.amount || 0),
         0,
       );
+      const rawGiftVoucherRows = Array.isArray(giftVoucherAdjustments)
+        ? giftVoucherAdjustments.filter(
+            (row) =>
+              row?.giftVoucherId &&
+              ObjectId.isValid(row.giftVoucherId) &&
+              row?.ledgerId &&
+              ObjectId.isValid(row.ledgerId) &&
+              Number(row.amount || 0) > 0,
+          )
+        : [];
+      const giftVoucherIds = rawGiftVoucherRows.map(
+        (row) => new ObjectId(row.giftVoucherId),
+      );
+      const giftVoucherLedgerIds = rawGiftVoucherRows.map(
+        (row) => new ObjectId(row.ledgerId),
+      );
+      const [giftVoucherDocs, giftVoucherLedgerDocs] = await Promise.all([
+        giftVoucherIds.length > 0
+          ? GiftVouchers.find({ _id: { $in: giftVoucherIds } }).toArray()
+          : Promise.resolve([]),
+        giftVoucherLedgerIds.length > 0
+          ? Ledgers.find({
+              companyId,
+              _id: { $in: giftVoucherLedgerIds },
+            }).toArray()
+          : Promise.resolve([]),
+      ]);
+      const giftVoucherMap = new Map(
+        giftVoucherDocs.map((row) => [String(row._id), row]),
+      );
+      const giftVoucherLedgerMap = new Map(
+        giftVoucherLedgerDocs.map((row) => [String(row._id), row]),
+      );
+      const requestedGiftVoucherUsage = new Map();
+      const normalizedGiftVoucherAdjustments = rawGiftVoucherRows.map((row) => {
+        const voucherDoc = giftVoucherMap.get(String(row.giftVoucherId));
+        if (!voucherDoc) {
+          throw new Error("One or more selected gift vouchers no longer exist");
+        }
+        const expiryDate = safeDate(voucherDoc.expiryDate);
+        if (expiryDate && new Date(date) > expiryDate) {
+          throw new Error(`${voucherDoc.name} is expired and cannot be used`);
+        }
+        const voucherKey = String(voucherDoc._id);
+        requestedGiftVoucherUsage.set(
+          voucherKey,
+          Number(requestedGiftVoucherUsage.get(voucherKey) || 0) + 1,
+        );
+        const ledgerDoc = giftVoucherLedgerMap.get(String(row.ledgerId));
+        if (!ledgerDoc) {
+          throw new Error("One or more selected gift voucher ledgers are invalid");
+        }
+        return {
+          giftVoucherId: voucherDoc._id,
+          giftVoucherName: normalizeName(voucherDoc.name || ""),
+          ledgerId: ledgerDoc._id,
+          ledgerName: normalizeName(ledgerDoc.name || row.ledgerName || ""),
+          amount: normalizeMoney(row.amount || 0),
+        };
+      });
+      normalizedGiftVoucherAdjustments.forEach((row) => {
+        const voucherDoc = giftVoucherMap.get(String(row.giftVoucherId));
+        if (
+          voucherDoc &&
+          voucherDoc.usageLimit !== null &&
+          voucherDoc.usageLimit !== undefined &&
+          Number(voucherDoc.usageCount || 0) +
+            Number(
+              requestedGiftVoucherUsage.get(String(voucherDoc._id)) || 0,
+            ) >
+            Number(voucherDoc.usageLimit || 0)
+        ) {
+          throw new Error(
+            `${voucherDoc.name} has reached its allowed usage limit`,
+          );
+        }
+      });
+      const giftVoucherAmount = normalizedGiftVoucherAdjustments.reduce(
+        (sum, row) => sumMoney(sum, row.amount || 0),
+        0,
+      );
       const rewardRedeemed = normalizeMoney(redeemedPoints || 0);
       const redeemLedgerDoc =
         redeemLedgerId && ObjectId.isValid(redeemLedgerId)
@@ -6340,7 +6424,7 @@ app.post(
           : null;
       const totalAmount = subtractMoney(
         subtractMoney(subtotal, additionalExpenseAmount),
-        rewardRedeemed,
+        sumMoney(rewardRedeemed, giftVoucherAmount),
       );
 
       const cashAmount = normalizeMoney(payments.cash || 0);
@@ -6443,6 +6527,14 @@ app.post(
           credit: signedAmount < 0 ? Math.abs(signedAmount) : 0,
         });
       });
+      normalizedGiftVoucherAdjustments.forEach((row) => {
+        if (!row.ledgerId || !(Number(row.amount || 0) > 0)) return;
+        lines.push({
+          ledgerId: row.ledgerId,
+          debit: Number(row.amount || 0),
+          credit: 0,
+        });
+      });
       if (rewardRedeemed > 0) {
         if (!redeemLedgerDoc) {
           return res.status(400).json({
@@ -6478,6 +6570,7 @@ app.post(
           discountValue: 0,
           invoiceDiscount: 0,
           additionalAdjustments: normalizedAdjustments,
+          giftVoucherAdjustments: normalizedGiftVoucherAdjustments,
           additionalExpenseLedgerId: normalizedAdjustments[0]?.ledgerId || null,
           additionalExpenseMode: normalizeName(
             normalizedAdjustments[0]?.mode || "fixed",
@@ -6486,6 +6579,7 @@ app.post(
             normalizedAdjustments[0]?.value || 0,
           ),
           additionalExpenseAmount,
+          giftVoucherAmount,
           redeemLedgerId: redeemLedgerDoc?._id || null,
           redeemLedgerName: normalizeName(
             redeemLedgerDoc?.name || redeemLedgerName || "",
@@ -6510,13 +6604,16 @@ app.post(
       }
 
       const result = await Vouchers.insertOne(doc);
+      await syncGlobalGiftVoucherUsage(
+        normalizedGiftVoucherAdjustments.map((row) => row.giftVoucherId),
+      );
       res
         .status(201)
         .json({ _id: result.insertedId, ...doc, customer: customerDoc });
     } catch (err) {
       console.error("Error creating POS voucher:", err);
       res
-        .status(500)
+        .status(resolvePosVoucherErrorStatus(err))
         .json({ message: err.message || "Error creating POS voucher" });
     }
   },
@@ -7315,6 +7412,23 @@ app.put(
                   amount: normalizeMoney(row.amount || 0),
                 }))
             : [],
+          giftVoucherAdjustments: Array.isArray(posMeta.giftVoucherAdjustments)
+            ? posMeta.giftVoucherAdjustments
+                .filter(
+                  (row) =>
+                    row?.giftVoucherId &&
+                    ObjectId.isValid(row.giftVoucherId) &&
+                    row?.ledgerId &&
+                    ObjectId.isValid(row.ledgerId),
+                )
+                .map((row) => ({
+                  giftVoucherId: new ObjectId(row.giftVoucherId),
+                  giftVoucherName: normalizeName(row.giftVoucherName || ""),
+                  ledgerId: new ObjectId(row.ledgerId),
+                  ledgerName: normalizeName(row.ledgerName || ""),
+                  amount: normalizeMoney(row.amount || 0),
+                }))
+            : [],
           additionalExpenseLedgerId:
             posMeta.additionalExpenseLedgerId &&
             ObjectId.isValid(posMeta.additionalExpenseLedgerId)
@@ -7329,6 +7443,7 @@ app.put(
           additionalExpenseAmount: normalizeMoney(
             posMeta.additionalExpenseAmount || 0,
           ),
+          giftVoucherAmount: normalizeMoney(posMeta.giftVoucherAmount || 0),
           redeemLedgerId:
             posMeta.redeemLedgerId && ObjectId.isValid(posMeta.redeemLedgerId)
               ? new ObjectId(posMeta.redeemLedgerId)
@@ -7418,6 +7533,104 @@ app.put(
           .map(normalizeInventoryLinePayload);
       }
 
+      const isPosVoucherUpdate =
+        nameKey(existingVoucher.voucherName || "") === "pos voucher" ||
+        nameKey(voucherName || "") === "pos voucher";
+      if (isPosVoucherUpdate && posMeta) {
+        const nextGiftRows = Array.isArray(update.$set.posMeta?.giftVoucherAdjustments)
+          ? update.$set.posMeta.giftVoucherAdjustments
+          : [];
+        const requestedIds = Array.from(
+          new Set(
+            nextGiftRows.map((row) => String(row.giftVoucherId || "")).filter(Boolean),
+          ),
+        );
+        if (requestedIds.length > 0) {
+          const [giftVoucherDocs, giftLedgerDocs, externalUsageRows] = await Promise.all([
+            GiftVouchers.find({
+              _id: { $in: requestedIds.map((id) => new ObjectId(id)) },
+            }).toArray(),
+            Ledgers.find({
+              companyId,
+              _id: {
+                $in: Array.from(
+                  new Set(
+                    nextGiftRows.map((row) => String(row.ledgerId || "")).filter(Boolean),
+                  ),
+                ).map((id) => new ObjectId(id)),
+              },
+            }).toArray(),
+            Vouchers.aggregate([
+              {
+                $match: activeVoucherFilter({
+                  _id: { $ne: voucherId },
+                  voucherName: { $regex: "^POS Voucher$", $options: "i" },
+                  "posMeta.giftVoucherAdjustments.0": { $exists: true },
+                }),
+              },
+              { $unwind: "$posMeta.giftVoucherAdjustments" },
+              {
+                $match: {
+                  "posMeta.giftVoucherAdjustments.giftVoucherId": {
+                    $in: requestedIds.map((id) => new ObjectId(id)),
+                  },
+                },
+              },
+              {
+                $group: {
+                  _id: "$posMeta.giftVoucherAdjustments.giftVoucherId",
+                  usageCount: { $sum: 1 },
+                },
+              },
+            ]).toArray(),
+          ]);
+
+          const giftVoucherMap = new Map(
+            giftVoucherDocs.map((row) => [String(row._id), row]),
+          );
+          const giftLedgerMap = new Map(
+            giftLedgerDocs.map((row) => [String(row._id), row]),
+          );
+          const requestedUsageMap = new Map();
+          nextGiftRows.forEach((row) => {
+            const voucherKey = String(row.giftVoucherId || "");
+            const voucherDoc = giftVoucherMap.get(voucherKey);
+            if (!voucherDoc) {
+              throw new Error("One or more selected gift vouchers no longer exist");
+            }
+            if (!giftLedgerMap.has(String(row.ledgerId || ""))) {
+              throw new Error("One or more selected gift voucher ledgers are invalid");
+            }
+            const expiryDate = safeDate(voucherDoc.expiryDate);
+            const effectiveDate = update.$set.date || existingVoucher.date || new Date();
+            if (expiryDate && effectiveDate > expiryDate) {
+              throw new Error(`${voucherDoc.name} is expired and cannot be used`);
+            }
+            requestedUsageMap.set(
+              voucherKey,
+              Number(requestedUsageMap.get(voucherKey) || 0) + 1,
+            );
+          });
+          const externalUsageMap = new Map(
+            externalUsageRows.map((row) => [String(row._id), Number(row.usageCount || 0)]),
+          );
+          requestedUsageMap.forEach((requestedCount, voucherKey) => {
+            const voucherDoc = giftVoucherMap.get(voucherKey);
+            if (
+              voucherDoc &&
+              voucherDoc.usageLimit !== null &&
+              voucherDoc.usageLimit !== undefined &&
+              Number(externalUsageMap.get(voucherKey) || 0) + Number(requestedCount) >
+                Number(voucherDoc.usageLimit || 0)
+            ) {
+              throw new Error(
+                `${voucherDoc.name} has reached its allowed usage limit`,
+              );
+            }
+          });
+        }
+      }
+
       if (Object.keys(update.$unset).length === 0) {
         delete update.$unset;
       }
@@ -7437,6 +7650,14 @@ app.put(
         nameKey(existingVoucher.voucherName || "") === "pos voucher" ||
         nameKey(updated?.voucherName || "") === "pos voucher"
       ) {
+        await syncGlobalGiftVoucherUsage([
+          ...((existingVoucher.posMeta?.giftVoucherAdjustments || []).map(
+            (row) => row.giftVoucherId,
+          )),
+          ...((updated?.posMeta?.giftVoucherAdjustments || []).map(
+            (row) => row.giftVoucherId,
+          )),
+        ]);
         await rebuildPosCustomerFromVouchers(
           companyId,
           existingVoucher.customerSnapshot?.phone,
@@ -7461,7 +7682,9 @@ app.put(
       res.json(updated);
     } catch (err) {
       console.error("Error updating voucher:", err);
-      res.status(500).json({ message: "Error updating voucher" });
+      res
+        .status(resolvePosVoucherErrorStatus(err))
+        .json({ message: err.message || "Error updating voucher" });
     }
   },
 );
@@ -7496,6 +7719,11 @@ app.delete(
         },
       );
       if (nameKey(existingVoucher.voucherName || "") === "pos voucher") {
+        await syncGlobalGiftVoucherUsage(
+          (existingVoucher.posMeta?.giftVoucherAdjustments || []).map(
+            (row) => row.giftVoucherId,
+          ),
+        );
         await rebuildPosCustomerFromVouchers(
           companyId,
           existingVoucher.customerSnapshot?.phone,
@@ -10852,6 +11080,82 @@ async function deleteNamedMaster(collection, companyId, id, usageCheck) {
   await collection.deleteOne({ _id: row._id, companyId });
 }
 
+async function listGlobalNamedMasters(collection, extraSort = {}) {
+  return collection
+    .find({})
+    .sort({ name: 1, ...extraSort })
+    .toArray();
+}
+
+async function createGlobalNamedMaster(
+  collection,
+  payload,
+  options = {},
+  context = {},
+) {
+  const name = normalizeName(payload.name);
+  if (!name) throw new Error("Name is required");
+
+  const duplicate = await collection.findOne({
+    name: { $regex: `^${escapeRegex(name)}$`, $options: "i" },
+  });
+  if (duplicate) {
+    throw new Error(options.duplicateMessage || "Name already exists");
+  }
+
+  const doc = {
+    name,
+    createdAt: new Date(),
+    ...(options.mapPayload ? options.mapPayload(payload, context) : {}),
+  };
+
+  const result = await collection.insertOne(doc);
+  return { _id: result.insertedId, ...doc };
+}
+
+async function updateGlobalNamedMaster(
+  collection,
+  id,
+  payload,
+  options = {},
+  context = {},
+) {
+  const rowId = new ObjectId(id);
+  const existing = await collection.findOne({ _id: rowId });
+  if (!existing) throw new Error("Record not found");
+  if (existing.isSystem) throw new Error("System master cannot be altered");
+
+  const name = normalizeName(payload.name);
+  if (!name) throw new Error("Name is required");
+
+  const duplicate = await collection.findOne({
+    _id: { $ne: rowId },
+    name: { $regex: `^${escapeRegex(name)}$`, $options: "i" },
+  });
+  if (duplicate) {
+    throw new Error(options.duplicateMessage || "Name already exists");
+  }
+
+  await collection.updateOne(
+    { _id: rowId },
+    {
+      $set: {
+        name,
+        updatedAt: new Date(),
+        ...(options.mapPayload ? options.mapPayload(payload, context, existing) : {}),
+      },
+    },
+  );
+}
+
+async function deleteGlobalNamedMaster(collection, id, usageCheck) {
+  const row = await collection.findOne({ _id: new ObjectId(id) });
+  if (!row) throw new Error("Record not found");
+  if (row.isSystem) throw new Error("System master cannot be deleted");
+  if (usageCheck) await usageCheck(row);
+  await collection.deleteOne({ _id: row._id });
+}
+
 async function resolveDefaultPosLedgers(companyId) {
   const ledgers = await Ledgers.aggregate([
     { $match: { companyId } },
@@ -11004,6 +11308,75 @@ async function syncGlobalPosCustomerRewards(phoneInput) {
   );
 
   return summary;
+}
+
+async function syncGlobalGiftVoucherUsage(giftVoucherIds = []) {
+  const requestedIds = Array.from(
+    new Set(
+      (giftVoucherIds || [])
+        .filter((id) => id && ObjectId.isValid(id))
+        .map((id) => String(id)),
+    ),
+  );
+  if (requestedIds.length === 0) return;
+
+  const voucherObjectIds = requestedIds.map((id) => new ObjectId(id));
+  const usageRows = await Vouchers.aggregate([
+    {
+      $match: activeVoucherFilter({
+        voucherName: { $regex: "^POS Voucher$", $options: "i" },
+        "posMeta.giftVoucherAdjustments.0": { $exists: true },
+      }),
+    },
+    { $unwind: "$posMeta.giftVoucherAdjustments" },
+    {
+      $match: {
+        "posMeta.giftVoucherAdjustments.giftVoucherId": {
+          $in: voucherObjectIds,
+        },
+      },
+    },
+    {
+      $group: {
+        _id: "$posMeta.giftVoucherAdjustments.giftVoucherId",
+        usageCount: { $sum: 1 },
+      },
+    },
+  ]).toArray();
+
+  const usageMap = new Map(
+    usageRows.map((row) => [String(row._id), Number(row.usageCount || 0)]),
+  );
+
+  await Promise.all(
+    voucherObjectIds.map((giftVoucherId) =>
+      GiftVouchers.updateOne(
+        { _id: giftVoucherId },
+        {
+          $set: {
+            usageCount: Number(usageMap.get(String(giftVoucherId)) || 0),
+            updatedAt: new Date(),
+          },
+        },
+      ),
+    ),
+  );
+}
+
+function resolvePosVoucherErrorStatus(err) {
+  const message = String(err?.message || "");
+  const validationPatterns = [
+    /gift voucher/i,
+    /usage limit/i,
+    /expired/i,
+    /reward points/i,
+    /payment total/i,
+    /cash \+ bank payment/i,
+    /cash \+ bank/i,
+    /select.*ledger/i,
+    /must match total/i,
+  ];
+  return err?.status || err?.statusCode || (validationPatterns.some((pattern) => pattern.test(message)) ? 400 : 500);
 }
 
 async function rebuildPosCustomerFromVouchers(companyId, phoneInput) {
@@ -11357,6 +11730,129 @@ app.delete(
       res
         .status(400)
         .json({ message: err.message || "Unable to delete godown" });
+    }
+  },
+);
+
+app.get("/companies/:companyId/gift-vouchers", async (req, res) => {
+  try {
+    res.json(await listGlobalNamedMasters(GiftVouchers, { createdAt: -1 }));
+  } catch (err) {
+    res.status(500).json({ message: "Unable to load gift vouchers" });
+  }
+});
+
+app.post(
+  "/companies/:companyId/gift-vouchers",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      const companyId = new ObjectId(req.params.companyId);
+      const row = await createGlobalNamedMaster(
+        GiftVouchers,
+        req.body,
+        {
+          duplicateMessage: "Gift voucher already exists",
+          mapPayload: (payload, context) => {
+            const rawLimit = String(payload.usageLimit ?? "").trim();
+            const parsedLimit = Number(rawLimit || 0);
+            if (rawLimit !== "" && !Number.isFinite(parsedLimit)) {
+              throw new Error("Usage limit must be a valid number");
+            }
+            if (rawLimit !== "" && parsedLimit <= 0) {
+              throw new Error("Usage limit must be greater than 0");
+            }
+            const usageLimit =
+              rawLimit === "" ? null : Math.trunc(parsedLimit);
+            const expiryDate = normalizeTextBlock(payload.expiryDate || "");
+            return {
+              usageLimit,
+              expiryDate: expiryDate || "",
+              usageCount: 0,
+              createdByCompanyId: context.companyId,
+              createdByCompanyName: context.companyName || "",
+              updatedAt: new Date(),
+            };
+          },
+        },
+        {
+          companyId,
+          companyName:
+            (await Companies.findOne(
+              { _id: companyId },
+              { projection: { name: 1 } },
+            ))?.name || "",
+        },
+      );
+      res.status(201).json(row);
+    } catch (err) {
+      res.status(400).json({ message: err.message || "Unable to create gift voucher" });
+    }
+  },
+);
+
+app.put(
+  "/companies/:companyId/gift-vouchers/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      await updateGlobalNamedMaster(
+        GiftVouchers,
+        req.params.id,
+        req.body,
+        {
+          duplicateMessage: "Gift voucher already exists",
+          mapPayload: (payload, context, existing) => {
+            const rawLimit = String(payload.usageLimit ?? "").trim();
+            const parsedLimit = Number(rawLimit || 0);
+            if (rawLimit !== "" && !Number.isFinite(parsedLimit)) {
+              throw new Error("Usage limit must be a valid number");
+            }
+            if (rawLimit !== "" && parsedLimit <= 0) {
+              throw new Error("Usage limit must be greater than 0");
+            }
+            const usageLimit =
+              rawLimit === "" ? null : Math.trunc(parsedLimit);
+            if (
+              usageLimit !== null &&
+              Number(existing?.usageCount || 0) > Number(usageLimit)
+            ) {
+              throw new Error(
+                "Usage limit cannot be lower than the already used count",
+              );
+            }
+            const expiryDate = normalizeTextBlock(payload.expiryDate || "");
+            return {
+              usageLimit,
+              expiryDate: expiryDate || "",
+              updatedAt: new Date(),
+            };
+          },
+        },
+        {},
+      );
+      res.json(
+        await GiftVouchers.findOne({ _id: new ObjectId(req.params.id) }),
+      );
+    } catch (err) {
+      res.status(400).json({ message: err.message || "Unable to update gift voucher" });
+    }
+  },
+);
+
+app.delete(
+  "/companies/:companyId/gift-vouchers/:id",
+  requireCompanyWriteAccess(ROLE_GROUPS.accountingMasters),
+  async (req, res) => {
+    try {
+      await deleteGlobalNamedMaster(GiftVouchers, req.params.id, async (row) => {
+        if (Number(row.usageCount || 0) > 0) {
+          throw new Error("Gift voucher is already used and cannot be deleted");
+        }
+      });
+      res.json({ message: "Gift voucher deleted" });
+    } catch (err) {
+      res.status(400).json({ message: err.message || "Unable to delete gift voucher" });
     }
   },
 );
