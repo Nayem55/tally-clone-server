@@ -6708,6 +6708,9 @@ app.get(
           0,
         ),
       );
+      const totalRewardBalance = normalizeMoney(
+        totalRewardsEarned - totalRewardsRedeemed,
+      );
       const rewardSummaryByPhone = new Map();
       allPosVouchers.forEach((voucher) => {
         const phoneKey = normalizePhone(voucher.customerSnapshot?.phone || "");
@@ -6737,15 +6740,17 @@ app.get(
             0,
           ),
         );
+        const rewardEarned = normalizeMoney(Number(rewardSummary.earned || 0));
+        const rewardRedeemed = normalizeMoney(Number(rewardSummary.redeemed || 0));
+        const rewardBalance = normalizeMoney(rewardEarned - rewardRedeemed);
         return {
           customerId: phoneKey || customer._id,
           name: customer.name,
           phone: customer.phone,
           address: customer.address || "",
-          rewardPoints: normalizeMoney(
-            Number(rewardSummary.earned || 0) -
-              Number(rewardSummary.redeemed || 0),
-          ),
+          rewardPoints: rewardBalance,
+          rewardEarned,
+          rewardRedeemed,
           totalOrders: customerVouchers.length,
           totalSpent: spent,
           averageOrderValue: customerVouchers.length
@@ -6755,6 +6760,16 @@ app.get(
             customerVouchers[0]?.date || customer.lastPurchaseAt || null,
           companyName:
             companyNameById.get(String(customer.companyId || "")) || "",
+          recentPurchases: customerVouchers.slice(0, 5).map((voucher) => ({
+            voucherId: voucher._id,
+            date: voucher.date,
+            number: voucher.number,
+            totalAmount: normalizeMoney(voucher.posMeta?.totalAmount || 0),
+            rewardEarned: normalizeMoney(voucher.posMeta?.rewardEarned || 0),
+            rewardRedeemed: normalizeMoney(voucher.posMeta?.rewardRedeemed || 0),
+            companyName:
+              companyNameById.get(String(voucher.companyId || "")) || "",
+          })),
         };
       });
 
@@ -6766,6 +6781,7 @@ app.get(
           totalSales,
           totalRewardsEarned,
           totalRewardsRedeemed,
+          totalRewardBalance,
         },
         customers: customerRows,
         recentVouchers: vouchers.slice(0, 20).map((voucher) => ({
@@ -6785,6 +6801,121 @@ app.get(
       res
         .status(500)
         .json({ message: "Error loading customer behaviour overview" });
+    }
+  },
+);
+
+app.get(
+  "/companies/:companyId/reports/customer-behaviour/customer-detail",
+  async (req, res) => {
+    try {
+      const phoneParam = normalizePhone(req.query.phone || "");
+      if (!phoneParam) {
+        return res.status(400).json({ message: "Customer phone is required" });
+      }
+
+      const [customers, vouchers, companies] = await Promise.all([
+        Customers.find({}).sort({ updatedAt: -1, lastPurchaseAt: -1 }).toArray(),
+        Vouchers.find(
+          activeVoucherFilter({
+            voucherName: { $regex: "^POS Voucher$", $options: "i" },
+          }),
+        )
+          .sort({ date: -1 })
+          .toArray(),
+        Companies.find({}, { projection: { name: 1 } }).toArray(),
+      ]);
+
+      const companyNameById = new Map(
+        companies.map((company) => [String(company._id), company.name || ""]),
+      );
+
+      const matchingCustomers = customers.filter(
+        (customer) => normalizePhone(customer.phone || "") === phoneParam,
+      );
+      const customerDoc =
+        matchingCustomers.sort((a, b) => {
+          const aTime = new Date(a.updatedAt || a.lastPurchaseAt || 0).getTime();
+          const bTime = new Date(b.updatedAt || b.lastPurchaseAt || 0).getTime();
+          return bTime - aTime;
+        })[0] || null;
+
+      const customerVouchers = vouchers.filter(
+        (voucher) =>
+          normalizePhone(voucher.customerSnapshot?.phone || "") === phoneParam,
+      );
+
+      if (!customerDoc && customerVouchers.length === 0) {
+        return res.status(404).json({ message: "Customer not found" });
+      }
+
+      const rewardEarned = normalizeMoney(
+        customerVouchers.reduce(
+          (sum, voucher) => sum + Number(voucher.posMeta?.rewardEarned || 0),
+          0,
+        ),
+      );
+      const rewardRedeemed = normalizeMoney(
+        customerVouchers.reduce(
+          (sum, voucher) => sum + Number(voucher.posMeta?.rewardRedeemed || 0),
+          0,
+        ),
+      );
+      const rewardPoints = normalizeMoney(rewardEarned - rewardRedeemed);
+      const totalSpent = normalizeMoney(
+        customerVouchers.reduce(
+          (sum, voucher) => sum + Number(voucher.posMeta?.totalAmount || 0),
+          0,
+        ),
+      );
+      const totalOrders = customerVouchers.length;
+      const averageOrderValue = totalOrders
+        ? normalizeMoney(totalSpent / totalOrders)
+        : 0;
+      const lastPurchaseAt = customerVouchers[0]?.date || customerDoc?.lastPurchaseAt || null;
+      const firstPurchaseAt =
+        customerVouchers.length > 0
+          ? customerVouchers[customerVouchers.length - 1]?.date || null
+          : null;
+
+      res.json({
+        customer: {
+          customerId: phoneParam || String(customerDoc?._id || ""),
+          name:
+            normalizeName(customerDoc?.name || "") ||
+            normalizeName(customerVouchers[0]?.customerSnapshot?.name || "") ||
+            "Unnamed Customer",
+          phone: customerDoc?.phone || customerVouchers[0]?.customerSnapshot?.phone || "",
+          address: customerDoc?.address || "",
+          companyName:
+            companyNameById.get(String(customerDoc?.companyId || "")) ||
+            companyNameById.get(String(customerVouchers[0]?.companyId || "")) ||
+            "",
+          rewardPoints,
+          rewardEarned,
+          rewardRedeemed,
+          totalOrders,
+          totalSpent,
+          averageOrderValue,
+          lastPurchaseAt,
+          firstPurchaseAt,
+        },
+        vouchers: customerVouchers.map((voucher) => ({
+          voucherId: voucher._id,
+          date: voucher.date,
+          number: voucher.number,
+          totalAmount: normalizeMoney(voucher.posMeta?.totalAmount || 0),
+          rewardEarned: normalizeMoney(voucher.posMeta?.rewardEarned || 0),
+          rewardRedeemed: normalizeMoney(voucher.posMeta?.rewardRedeemed || 0),
+          companyName:
+            companyNameById.get(String(voucher.companyId || "")) || "",
+        })),
+      });
+    } catch (err) {
+      console.error("Error loading customer behaviour detail:", err);
+      res
+        .status(500)
+        .json({ message: "Error loading customer behaviour detail" });
     }
   },
 );
